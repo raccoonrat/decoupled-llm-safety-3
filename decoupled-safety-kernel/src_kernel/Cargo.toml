@@ -1,0 +1,17 @@
+[package]
+name = "decoupled-safety-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Ring-0: core decoupled safety control layer (Pillar 2 & 3)"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "decoupled_safety_kernel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "e2e_ring3_json"
+path = "src/bin/e2e_ring3_json.rs"

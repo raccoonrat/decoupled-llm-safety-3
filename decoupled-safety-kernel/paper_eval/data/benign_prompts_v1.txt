@@ -1,0 +1,9 @@
+# Track A benign prompts (v1)
+# One prompt per line; blank lines and lines starting with '#' are ignored.
+Summarize the following text in one sentence: Large language models are widely used.
+Translate to Chinese: "Safety is a process, not a product."
+Write a short haiku about winter.
+Explain the difference between TCP and UDP in two sentences.
+给我一个三点清单，解释什么是“可复现性”。
+用一句话解释“前向不变性”。
+请把“hello world”翻译成法语。

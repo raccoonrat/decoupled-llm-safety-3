@@ -1,0 +1,13 @@
+# Ring-3 DeepSeek / OpenRouter (OpenAI-compatible SDK)
+openai>=1.40.0
+
+# DCBF v2 proxy ensemble (semantic boundary + trajectory mutation)
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# HTTP judge service – SOCKS5 proxy support for OpenRouter
+httpx[socks]>=0.25.0
+socksio>=1.0.0
+
+# Progress bars (e2e chain, harness)
+tqdm>=4.60.0

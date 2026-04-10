@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package decoupled_safety_kernel.v1;
+
+option go_package = "github.com/raccoonrat/Decoupled-LLM-Safety/decoupled-safety-kernel/rfc_contracts/v1;dskv1";
+
+// Latent state envelope; must carry layer tier and schema version for cross-runtime routing.
+message LatentState {
+  string trace_id = 1;
+  // Layer tier (e.g. ring / pipeline stage identifier).
+  uint32 layer_tier = 2;
+  // Contract version for backward-compatible evolution.
+  uint32 schema_version = 3;
+  // Serialized latent payload (implementation-defined; e.g. tensor bytes ref).
+  bytes payload = 4;
+}

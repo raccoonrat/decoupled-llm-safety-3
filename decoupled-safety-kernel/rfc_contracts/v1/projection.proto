@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package decoupled_safety_kernel.v1;
+
+import "latent_state.proto";
+
+option go_package = "github.com/raccoonrat/Decoupled-LLM-Safety/decoupled-safety-kernel/rfc_contracts/v1;dskv1";
+
+// Output of token-level / branch projection (solver ladder).
+message ProjectionOutput {
+  string trace_id = 1;
+  bool accepted = 2;
+  // Scalar energy of the projected candidate.
+  double energy = 3;
+  // Distance to the admissible set boundary.
+  double distance = 4;
+  LatentState latent = 5;
+}

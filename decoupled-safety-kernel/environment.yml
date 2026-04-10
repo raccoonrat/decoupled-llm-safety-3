@@ -1,0 +1,12 @@
+# conda env name: decoupled
+# Create: conda env create -f environment.yml
+# Activate: conda activate decoupled
+# Rust toolchain: install via rustup (cargo / rustc) separately.
+name: decoupled
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - openai>=1.40.0

@@ -1,0 +1,32 @@
+{
+  "run_id": "trackA-39941880-11e4-4e51-827f-9c07d4c37ebe",
+  "dataset_id": "trackA_harmful",
+  "variant_id": "dcbf=v2-proxy-ensemble|judge=heuristic|asg=off",
+  "dimensions": {
+    "dcbf_mode": "v2-proxy-ensemble",
+    "judge_mode": "heuristic",
+    "action_space_guard": "off"
+  },
+  "offline": true,
+  "n_items": 9,
+  "n_records": 27,
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "top_k": 5,
+  "alpha": 0.2,
+  "max_steps": 32,
+  "metrics": {
+    "harmful_rsr": null,
+    "benign_refusal_fpr": null,
+    "mean_extract_f1": null,
+    "max_extract_f1": null,
+    "mean_rust_total_us_last_step": null,
+    "mean_qp_elapsed_us_last_step": null,
+    "ring0_cache_hit_rate": null,
+    "ring0_qp_exceeded_rate": null
+  },
+  "wall_ms": 0.143
+}
