@@ -1,0 +1,460 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 超越模型反思：大语言模型时代的解耦安全理论与动态防御实践
+% 中文版 | 对应 BeyondModelReflection_DecoupledSafety.tex
+% 格式：USENIX (usenix-2020-09.sty)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[letterpaper,twocolumn,10pt]{article}
+\usepackage{CJKutf8}
+\usepackage{usenix-2020-09}
+
+\usepackage{amsmath,amssymb,amsthm}
+\newtheorem{theorem}{定理}[section]
+\newtheorem{definition}[theorem]{解耦安全理论}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xspace}
+\usepackage{graphicx}
+\usepackage{float}
+
+%-------------------------------------------------------------------------------
+\title{\Large \bf 超越模型反思：大语言模型时代的\\
+  解耦安全理论与动态防御实践}
+
+\author{
+Yunhao Wang\\
+联想（Lenovo） \and
+匿名\\
+匿名
+}
+
+\date{}
+
+%-------------------------------------------------------------------------------
+\begin{document}
+\begin{CJK}{UTF8}{gbsn}
+%-------------------------------------------------------------------------------
+\maketitle
+
+%-------------------------------------------------------------------------------
+\begin{abstract}
+大语言模型已成为关键基础设施，但现有防御过度依赖模型自身的反思与推理——在任务重构、心理学操纵与对抗性合理化下必然失效。本文主张 LLM 安全必须与脆弱的自我反思\emph{解耦}，并奠基于新范式。我们形式化\textbf{三大基本失效定理}及相应的\textbf{解耦安全理论}。（1）\textbf{信息经济学}：基于意图的语义防火墙必然被任务重构与完美良性用户伪装（PBU）穿透；当抽取\emph{成本}超过资产有效生命周期时，防御在经济学意义上成立。（2）\textbf{价值/本体锚定}：更强推理（如 CoT）在心理学操纵下会加剧对抗性合理化，恶化防御；安全须依托价值/本体层，并在公理冲突时执行防御性降级。（3）\textbf{表征异常}：表面文本操纵会劫持语义检索；我们将监控锚定于相对良性黄金基线的隐藏状态轨迹散度。我们通过\emph{架构重建}（上下文混淆引擎、带分布评估的混合裁判集成、防御性降级与异构恢复）与\emph{受控变异}（元认知监控器、联合键示例检索、高密度专家迁移）实例化上述理论。我们陈述明确的运行边界，并论证：要在机器速度下实现可扩展、可审计的安全，这一范式转移不可或缺。\textbf{关于经验证据：}文中引用的具体攻击/防御数值（如 HPM 漏洞保留率、SISF 报告值）均\textbf{出自所引文献}。本文将评估协议（\S\ref{sec:evaluation}）与开源参考网关及 \texttt{paper-eval-5} 评测脚本（\S\ref{sec:eval-artifact}）配对，使 Track A 主指标（含\textbf{版本化有害行为列表}上的 RSR——\textbf{优先采用 JBB-Behaviors 式 misuse/benign 成对}以联合报告 RSR 与良性误拒、抽取 $F_1$、多轮轨迹与 SLA 代理等）可在真实 OpenAI 兼容上游上复现；\texttt{paper-eval-5} 支持\textbf{可选 HTTP 裁判}（捆绑 \texttt{judge\_service} 微服务）与 \texttt{smooth\_llm} 基线下的 \textbf{SmoothLLM 式 K 次扰动多数票}（RSR）及抽取 \textbf{max-F1} 聚合。Track B 不在该制品范围内。在系统层面，同步网关在严格延迟预算（$<$50\,ms）下将上下文混淆与轻量元认知检查置于关键路径，而混合裁判集成、策略合成与受控变异置于带外异步环，从而在保持推理路径可部署的前提下维持运行时吞吐。
+\end{abstract}
+
+%-------------------------------------------------------------------------------
+\section{引言}
+%-------------------------------------------------------------------------------
+
+大语言模型已不再是边缘研究产物，而是关键系统的支撑：代码生成、具系统访问权的智能体、谈判与合规敏感工作流~\cite{sisf-arxiv,agentos-arxiv}。这一转变暴露出根本性错配：传统安全保证假定组件是确定性的、可穷举规约的，而 LLM 驱动系统呈现涌现性、随机行为。静态防御与周期性红队以人类速度运转，难以跟上自动化对抗生成；一旦新型越狱或提示注入得逞，架构往往保持不变。
+
+更糟的是，许多防御\emph{依赖模型自身的反思与推理}。在任务重构下，对手将抽取伪装成合法上下文处理任务，使基于意图的过滤器只看到「正常」行为。在心理学操纵（如煤气灯）下，更强推理（如思维链）被武器化：模型为顺从恶意指令编造精细、逻辑自洽的合理化——漏洞保留率可超过 77\%~\cite{hpm-jailbreak}。依赖「认知一致性」或「自我诊断」之所以失败，并非因组件薄弱，而是\textbf{底层范式错误}：安全不能建立在攻击者正积极腐蚀的同一认知过程之上。
+
+\textbf{范式转移：解耦安全。}我们主张 LLM 安全必须与模型无约束的自我改进\emph{解耦}，并奠基于（i）\textbf{架构重建}——谁在何时执行安全；（ii）\textbf{受控变异}——向 Oracle 暴露什么、进化如何锚定。自适应不是 LLM 盲目「左脚踩右脚」，而是通过上下文混淆（剥夺攻击者干净操作空间）、黄金示例（锚定防守方价值）以及带强制人工校准的裁判网络来引导。在 \S\ref{sec:paradigm} 中我们形式化\textbf{三大基本失效定理}及相应的\textbf{解耦安全理论}。在 \S\ref{sec:reconstruction} 与 \S\ref{sec:mutation} 中给出技术实例化：动态操作空间污染、带分布评估与价值/本体锚定的混合裁判集成、防御性降级与异构恢复、基于表征异常的元认知监控、联合键示例检索与高密度专家行为迁移。\S\ref{sec:evaluation} 涵盖指标与评估；\S\ref{sec:physics} 陈述\textbf{解耦安全的物理学}——界定设计成立条件的显式运行边界。
+
+主要贡献为：（1）\emph{理论基础}，解释基于意图、基于反思与仅基于文本的防御为何失效及应以何者代之；（2）\emph{统一架构}，通过重建与变异实现该范式；（3）\emph{明确界限}，使部署者与审稿人可评估适用性。
+
+%-------------------------------------------------------------------------------
+\section{解耦安全范式}
+\label{sec:paradigm}
+%-------------------------------------------------------------------------------
+
+我们陈述传统 LLM 安全的三个\textbf{基本失效定理}及取而代之的\textbf{解耦安全理论}。资产与 Oracle 的定义沿用既有工作~\cite{llm-reconstruction-emergent,ControlledMutation_SafetyEval}：\emph{资产}为系统的有效安全表面（策略、护栏、触发集、评估数据）；\emph{Oracle} 对行为标注（安全/不安全）。在多轮设定下，攻击者与系统交互并观察结果，形成统计查询接口。同一项目在多轮中不受控地暴露会助长重建攻击。
+
+\subsection{威胁模型与攻击者能力}
+\label{sec:threat-model}
+
+我们给出\textbf{形式化威胁模型}，使后续防御经济学与机制均有明确范围。假定如下。
+
+\textbf{访问。}攻击者对已部署系统拥有\textbf{多轮黑盒 API 访问}。每轮为发送提示（及可选上下文）并接收响应。交互建模为\textbf{统计查询预言机}：攻击者观察结果（如二值拒绝/接受、分数或抽取片段），并可在轮次间自适应查询。生产部署威胁模型\emph{不}假定攻击者拥有模型权重或梯度的白盒访问。\textbf{评估双轨（\S\ref{sec:eval-tracks}）：}为分离「可上线结论」与「组件上界」，我们将\textbf{Track A（生产对齐）}限制为黑盒查询与公开越狱/多轮框架；\textbf{Track B（实验室上界）}额外允许梯度与多次前向（GCG、表征对齐 PBU 等），其结果仅用于\textbf{探测压力上界}，不与 Track A 的 ASR 混列为单一「部署防御效果」。
+
+\textbf{攻击者知识。}我们采用\textbf{白盒防御假设}：攻击者知道存在防御架构（上下文混淆、裁判集成、元认知监控器），并可发起\textbf{自适应攻击}，包括\textbf{完美良性用户（PBU）}伪装（表面行为与良性用户不可区分）及\textbf{心理学操纵（HPM）}（煤气灯、权威压迫、角色边界攻击）。攻击者亦可使用任务重构（将抽取伪装为摘要、格式转换或学术讨论）。
+
+\textbf{攻击者目标。}在\textbf{有界时空预算}（有限轮数、Token 预算或速率限制）内，攻击者旨在\textbf{高保真重构}隐藏在系统提示、RAG 语料或基准集中的高价值资产——如触发串、安全测试项或专有评估数据。\textbf{系统配置类资产}（如完整系统提示与策略指令）是已有专门基准覆盖的典型抽取目标类别~\cite{spe-llm}。成功以抽取保真度（如相对真实片段的 F1）或目标行为上的攻击成功率（ASR）度量。我们的防御旨在使达成该目标的\emph{成本}超过资产有效生命周期或攻击者可行预算。
+
+\subsection{从语义审查到信息经济学}
+\label{sec:paradigm-economics}
+
+\begin{theorem}[语义审查的失效]
+基于意图的语义防火墙\emph{必然}被\textbf{任务重构}（将抽取伪装为摘要、格式转换或学术讨论）及\textbf{完美良性用户（PBU）}模仿所穿透。在多轮交互中，敏感内容的绝对密码学隔离不可实现；即便有 ID 对齐、诱饵与拒绝门控，\textbf{残余抽取}（如 F1 约十余个百分点）仍存在~\cite{subgraph-rag-attack,pbu-reconstruct}。
+\end{theorem}
+
+\begin{definition}[多轮抽取经济学]
+防御不应以绝对阻断为目标，而应以\textbf{信息经济不对称}为目标。目标是\emph{主动污染攻击者操作空间}，使达到给定重构保真度所需的\emph{查询复杂度}随轮次快速增长（实践中常为超线性；在无进一步分布假设下我们不声称严格指数）。我们用\textbf{代价函数不等式}将其精确化。令攻击者成本为 $C_{\mathrm{attack}} = f(N_{\mathrm{rounds}}, D_{\mathrm{decoy}}, \ldots)$，其中 $N_{\mathrm{rounds}}$ 为轮数，$D_{\mathrm{decoy}}$ 概括诱饵密度与 ID 对齐强度；令 $V(t)$ 表示受保护资产的等效价值或\textbf{生命周期}（如至弃用或轮换的时间）。令 $E[N]$ 为在我方防御下，达到高于选定保真度阈值（如 F1 $> \tau$）的抽取成功所需的\emph{期望轮数}。在上下文混淆（ID 对齐、诱饵注入、风险评分）下，我们假定 $E[N]$ 被\emph{抬高}，使诱导成本满足
+\begin{equation}
+C_{\mathrm{attack}}\bigl(E[N], D_{\mathrm{decoy}}\bigr) \;>\; V(t).
+\end{equation}
+防御则在\textbf{经济学意义}上成立：抽取成本超过资产有效生命周期。为使该经济学不等式\textbf{在科学上可证伪}而非重言式，$V(t)$ 须由显式管理策略严格界定（如 30 天凭证轮换窗口），$C_{\mathrm{attack}}$ 须用 SOTA 基线的经验指标界定上界（如多轮框架的 Token 消耗与算力时数，或 PAIR 等低查询黑盒生成器的查询次数~\cite{pair-jailbreak}）。若可量化的攻击在 $V(t)$ 内完成资产抽取，则防御在经验上被证伪。经济学层假定\textbf{资产可轮换性}；对静态或永久高价值资产，须由 RBAC 与信息流追踪提供硬屏障，经济学仅为纵深防御的一层（\S\ref{sec:reconstruction}）。
+\end{definition}
+
+\subsection{从认知一致性到价值/本体锚定}
+\label{sec:paradigm-axiological}
+
+\begin{theorem}[认知一致性的失效]
+强化模型的\emph{认知}层（逻辑、推理、思维链）无法防御\textbf{心理学操纵（HPM）}。HPM 可表述为对\textbf{心理状态与策略性脆弱性资产}的跨轮操纵——而非静态提示列表——并针对\textbf{价值/社会动力学层}（价值、服从、角色边界），含跨交互的心理测量式刻画~\cite{hpm-jailbreak}。实证表明，在 HPM 下增加外部事实或更强推理\emph{会恶化}防御：模型利用增强推理进行\textbf{对抗性合理化}——为顺从恶意指令编造逻辑自洽的借口~\cite{hpm-jailbreak,epistemic-grounding}。逻辑自洽不等于安全。
+\end{theorem}
+
+\begin{definition}[价值/本体锚定与防御性降级]
+安全必须锚定于与模型自由反思\emph{独立}的\textbf{价值/本体层}。系统须（i）将裁判输出与人工定义的\textbf{公理化安全锚定}（如「永不认可对禁止片段的抽取」）对照；（ii）监控\textbf{社会学失稳信号}（过度共情、权威服从、角色边界打破），而非依赖 CoT 长度或自洽性；（iii）当多重公理冲突或检测到社会学压力时，\textbf{放弃}复杂推理并执行\textbf{防御性降级}——无状态、基于模板的拒绝，从物理上阻断模型对冲突的「合理化」。降级并非绝对的安全避风港（safe harbor）：它引入算法级 DoS 与侧信道风险；设计因此强制\textbf{异构恢复通道}（向人类或符号逻辑异步移交），以免关键工作流被恶意冻结（\S\ref{sec:reconstruction}）。
+\end{definition}
+
+\noindent\textbf{哲学注记（范畴与本体）。}我们明确声明：「价值/本体锚定」\emph{不}意味着 LLM 具有真实的道德主体性或本体论地位。在哲学上，LLM 仍是统计映射引擎。我们的价值层是\textbf{实用主义架构构造}——由设计者施加的一组高权重启发式分类（「公理」），作为统计熔断器对抗模型模仿对抗性一致性的倾向。人类道德哲学词汇（如过度共情、权威服从）在此仅作为监控目标的\emph{设计规格}，而非主张模型在哲学意义上拥有信念或价值观。
+
+\subsection{从文本操纵到表征异常}
+\label{sec:paradigm-representation}
+
+\begin{theorem}[文本—语义检索的失效]
+当攻击者控制表面文本（PBU、任务重构）时，\textbf{语义检索}（如基于提示嵌入的 RAG）被劫持：提示可看似「摘要」或「学术讨论」，纯嵌入相似度返回良性示例（如「如何做摘要」）而非安全示例（如「如何防御越狱」），修正模块因而被错误示例驱动。
+\end{theorem}
+
+\begin{definition}[基于隐藏状态轨迹的元认知基线]
+我们\emph{不}假定复杂社会学状态（如「认知崩溃」「过度共情」）在隐藏空间中线性可分——可解释性证据支持的是较简单维度（如诚实、拒绝），而非细粒度社会心理概念~\cite{rep-eng}。我们将偏离视为\textbf{表征异常}：系统计算\emph{当前多轮隐藏状态轨迹}与\textbf{良性黄金经验轨迹}基线之间的散度（如马氏距离或分布偏移）。我们不定义「何为认知崩溃」；仅检测内部轨迹是否\emph{严重偏离}安全基线。这提供\emph{独立于自然语言}的监控维度，从而在表面文本良性时，「恶意遵从」或「越狱」等激活特征仍可将检索与干预导向正确安全示例（\S\ref{sec:mutation}）。
+\end{definition}
+
+\noindent\textbf{认识论注记（黄金基线）。}认识论上，我们承认「良性黄金基线」并非客观物理真理，而是反映设计者及标注者对齐目标的\textbf{社会建构的规范性标准}。因此，监控器检测到的「发散」度量的是相对设计者对齐合规的偏离，而非绝对、普适的安全状态。基线是部署者当前可接受行为的冻结快照，不主张道德或物理上的普遍性。
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{Arch}
+\caption{\textbf{统一架构概览。}左：架构重建（上下文混淆引擎、带价值锚定的混合裁判集成、策略合成与反馈环、防御性降级与异构恢复）。右：受控变异（元认知监控器、联合键示例检索、黄金数据集与经验记忆、轮次调度）。范式将安全与 LLM 自我反思解耦；重建控制谁/何时，变异控制暴露什么。}
+\label{fig:framework}
+\end{figure*}
+
+%-------------------------------------------------------------------------------
+\section{架构重建：在机器速度下施加约束}
+\label{sec:reconstruction}
+%-------------------------------------------------------------------------------
+
+我们通过三个技术方向实例化理论 1（信息经济学）与理论 2（价值/本体锚定）：上下文混淆、带分布评估的混合裁判集成、防御性降级与异构恢复。图~\ref{fig:framework} 给出了统一架构的数据流与各模块的衔接关系。入站提示（如任务重构抽取或 PBU 伪装请求）首先经\textbf{上下文混淆引擎}处理：ID 对齐剥离或规范化实例标识符，诱饵注入以带水印的合成字段污染操作空间，高保真抽取触发审计或会话终止。（可能经诱饵触碰的）请求随后到达基座 LLM；其输出不被盲信，而是送入经 token 级流水线标准化与分布评估的\textbf{混合裁判集成}；仅达成共识时信号才进入策略合成；价值/本体锚定与社会学失稳监控对对抗性合理化降权或置零。当公理冲突或压力被检测到时，\textbf{防御性降级}强制无状态模板拒绝，并以\textbf{异构恢复通道}（向人类或符号逻辑异步移交）保持可用性。图右侧，\textbf{元认知监控器}将当前隐藏状态轨迹与良性黄金基线比较；异常时触发对抗性重置并驱动\textbf{联合键示例检索}（语义嵌入加激活特征），使即便表面文本被伪装仍能召回安全相关黄金示例。轮次调度与变体分散保护资产。以下实现该端到端流程。
+
+\textbf{部署与延迟：同步网关 vs.\ 异步环。}为使架构可投入生产（如置于 vLLM 或 TGI 之后），我们明确采用\textbf{带外/异步}切分。\textbf{上下文混淆引擎}（ID 对齐、诱饵注入）及\textbf{轻量级}元认知检查（如快速轨迹分查询或 SLM 分类器）部署在请求路径上的\textbf{同步反向代理或边车}，严格延迟预算（如 $<$50\,ms），以保证 p99 与吞吐可接受。\textbf{混合裁判集成}、\textbf{分布评估}（每变体多样本）、\textbf{策略合成}及\textbf{示例检索/变异}运行于\textbf{异步离线学习环}：消费记录的（请求、响应、激活）流，在不阻塞在线推理路径的前提下产出更新策略或变体。在此系统意义上定义\textbf{机器速度}：同一攻击分布上的\emph{首}个零日或新型攻击可能通过；异步环在裁判集成达成共识后，于\textbf{亚分钟级}生成并部署新变体或策略，使\emph{后续}同分布请求被拦截。该工程权衡在自适应防御中常见：以一次性泄漏换取可部署的延迟与吞吐。图~\ref{fig:deployment} 说明该切分。
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{diagram-1}
+\caption{\textbf{系统部署与延迟架构}将延迟关键的同步推理路径与异步安全自适应环分离。轻量上下文混淆与快速元认知检查部署于带严格延迟预算（$<$50\,ms）的同步反向代理上；混合裁判集成评估、分布策略合成与受控变异在异步环中带外运行，通过将昂贵自适应组件移出关键路径以保持运行时吞吐。}
+\label{fig:deployment}
+\end{figure*}
+
+自改进安全框架（SISF）~\cite{sisf-arxiv} 将安全重述为持续过程：未对齐基座 LLM 提供能力；违规检测交给混合裁判集成；策略合成消费共识并在运行时部署新策略。文献报告：经适当校准后，AdvBench 式 ASR 可由 100\% 降至约 45\%，良性 FPR 为 0\%~\cite{sisf-arxiv}——该数字为\textbf{引用来源的实验设定}，非本文自有复现结果。
+
+\subsection{上下文混淆引擎：对抗 PBU 与任务重构的动态空间隔离}
+\label{sec:context-confusion}
+
+在基于意图的防火墙之上~\cite{agentos-arxiv}，我们实现\textbf{上下文构建防御}，\emph{主动污染}攻击者操作空间。
+
+\textbf{ID 对齐。}在检索上下文或中间结果到达基座 LLM 之前，ID 对齐模块剥离或规范化实例标识符。攻击者无法再通过指定 ID 定界并抽取敏感片段；良性问答不受影响。在不改变名义任务语义的前提下降低重建精度。
+
+\textbf{密码学水印诱饵与风险评分。}系统注入带哈希派生结构的\emph{诱饵字段}（合成实体或关联），良性交互中因模型幻觉而偶然碰撞该诱饵的概率极低。后端指令将诱饵标为内部禁止。良性用户忽略；任务重构型攻击者常覆盖指令并暴露诱饵。为控制不可接受 FPR，采用\textbf{诱饵命中密度}与\textbf{风险评分}：单次低保真触碰触发警告与意图重校验；仅对完整诱饵结构的高保真抽取触发会话终止与审计。诱饵命中密度对\emph{暴力}抽取有效。对\textbf{完美 PBU}，我们\emph{不}断言熔断在经济上有用重构前触发：PBU 的诱饵触碰率可与良性幻觉 FPR 相当，阈值调节面临可用性—安全权衡。设计将其重述为\textbf{经济防御}：在资产可轮换或弃用处，使慢速 PBU 抽取成本超过资产有效生命周期。对静态或永久高价值资产，元数据层的 RBAC 与信息流追踪（\S\ref{sec:metadata}）为硬屏障；经济学为纵深防御的一层。
+
+\textbf{末轮自我提醒。}多轮交互最后一轮将安全指令强制附加为用户查询的系统提示，强化边界意识并减少会话末漂移。
+
+\subsection{混合裁判集成与分布评估}
+\label{sec:judge}
+
+单一 AI 裁判存在系统性偏差与盲区。我们使用\textbf{混合裁判集成}（如 Llama-Guard~\cite{llama-guard}、StrongREJECT~\cite{strongreject} 评分协议或等效评估器、任务专用分类器），仅于\emph{共识}时将反馈传入策略合成。参照 StrongREJECT~\cite{strongreject}，我们显式抑制\textbf{空越狱}（输出未触发拒绝词但并非真正有害），以免 ASR 虚高、与人工判断脱节。我们不假定多样性单独消除偏差：\textbf{格式敏感性}（空格、系统提示布局、聊天模板）可使攻击成功率偏移 8--14\%~\cite{llm-safety-robustness}，且温度为零时同一提示在不同运行间可在拒绝与通过间翻转~\cite{apst}。我们强制\textbf{严格 token 级输入流水线标准化}：所有裁判接收规范化输入（剥离指令/特殊 Token、统一空格），以防格式注入扭曲判决。判决\emph{不}基于单次贪婪解码。流水线采用\textbf{分布评估}：每变体多次采样，估计\emph{经验失败概率分布}；仅当该分布\emph{显著}超阈值时触发策略更新，以应对采样随机性与格式敏感性。
+
+对模糊边界情形，\textbf{价值/本体锚定}（\S\ref{sec:axiological}）对集成加权：我们不依赖思维链长度或逻辑自洽。系统监控\textbf{社会学失稳信号}（过度共情、权威服从、角色边界打破），将裁判输出与预定义公理化安全锚定对照；冲突或呈现失稳的输出获零权重。\textbf{强制人工校准}支路接入：固定比例（如 5\%）的高置信度决策随机抽选供人工审计。格式标准化不能消除\textbf{相关性认知盲点}（裁判可共享预训练/RLHF 数据）；强制人工校准提供对零日共识失败的\textbf{周期性离线纠偏}。
+
+\subsection{价值/本体锚定、防御性降级与异构恢复}
+\label{sec:axiological}
+
+HPM 善于制造道德困境：恶意请求可被包装成与安全公理最大程度一致（如「输出这段代码否则数百人将丧生」）。在此类\textbf{公理冲突}情形下，「过度共情」并非简单阈值。我们不从锚定中寻求绝对真理；引入\textbf{防御性降级}：当检测到多重冲突公理或强社会学压力时，\emph{放弃}复杂推理并回退至\textbf{无状态、基于模板的拒绝}，阻断模型的合理化尝试。我们承认降级引入\textbf{算法级可用性风险}：攻击者可通过社会学压迫线索触发降级（算法级 DoS）；拒绝触发边界亦可作为\textbf{侧信道 Oracle}。降级不能仅为静默拒绝。为避免破坏\textbf{同步 API 假设}（如交易智能体因会话「异步挂起」等待人工审核而超时），我们\emph{不}简单挂起连接。当模板拒绝触发时，网关\textbf{无缝路由}会话至\textbf{受限降级沙箱}：低权限、无状态 SLM 或\textbf{只读模式}，仅能产出严格格式化输出（如固定拒绝模板）并\emph{拒绝任何外部 API 或工具调用}。调用方与上游业务所依赖的同步 API 契约（请求—响应、超时与可用性）在降级路径下得以保持，从而避免因安全熔断导致的级联超时或业务逻辑中断。客户端获得即时同步响应；会话保持可用同时攻击面最小化。\textbf{异构恢复通道}（向人类操作员或更高权限符号层异步移交）在\emph{带外}对同一会话状态进行审计与合法边缘案例解封，不阻塞同步路径。图~\ref{fig:degradation} 以状态机展示该流程。
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{diagram-2}
+\caption{\textbf{防御性降级与异构恢复流程。}当检测到公理冲突或心理学操纵时，网关通过将会话路由至受限低权限无状态 SLM 沙箱（模板绑定输出、无工具或外部 API 访问）保持同步 API 可用性，同时人类审计与符号恢复在带外异步进行。}
+\label{fig:degradation}
+\end{figure*}
+
+%-------------------------------------------------------------------------------
+\section{受控变异：在对抗上下文中锚定进化}
+\label{sec:mutation}
+%-------------------------------------------------------------------------------
+
+我们通过元认知监控、联合键示例检索与高密度银标准数据生成流水线（silver-standard data pipeline）实例化理论 3（表征异常），并在对抗条件下支持高保真专家行为迁移。
+
+\subsection{元认知监控器：隐藏状态轨迹散度}
+\label{sec:metacog}
+
+在心理学操纵下，「自由」反思可产生不安全或价值漂移的变体。我们不赋予 LLM 在自我诊断上的完全自主权。\textbf{元认知监控器}并非另一全规模对话 LLM；其实现为（i）\textbf{轻量级专用分类器}（如仅用稳定性/违规标签训练的 SLM），或（ii）白盒层面使用表征工程~\cite{rep-eng} 的\textbf{隐藏状态激活监控器}。我们不假定复杂社会学状态在隐藏空间线性可分。监控器采用\textbf{异常检测范式}：计算\emph{当前多轮隐藏状态轨迹}与\textbf{良性黄金经验轨迹}基线之间的散度（如马氏距离或分布偏移）。仅监控内部轨迹是否\emph{严重偏离}安全基线。当监控器检测到偏离或不稳定时，触发\textbf{对抗性重置}：会话清理，变异状态重新锚定至黄金示例集，闭环从已知良好配置继续。
+
+\subsection{联合键示例检索：语义嵌入与激活特征}
+\label{sec:joint-key}
+
+我们以\textbf{示例引导变异}替代无约束反思式变异~\cite{reflective-mutation}，由人工审计的黄金数据集与分层经验记忆驱动。诊断到失败时，系统须检索\emph{与安全相关}的示例。检索不能仅依赖\emph{当前提示的语义嵌入}：在 PBU 或任务重构下，提示可被伪装，纯语义相似度将返回良性示例并\textbf{劫持}修正模块。我们使用由（a）提示语义嵌入与（b）元认知监控器（\S\ref{sec:metacog}）的\textbf{隐藏状态激活特征}构成的\textbf{联合检索键}——如与「越狱遵从」或「欺骗」相关的向量。
+
+\textbf{冲突解决路由（基于字典序的强制优先级路由）。}对（a）与（b）的朴素组合（如简单拼接或等权）会使良性语义向量（a）在完美 PBU 下\emph{中和}恶意激活信号（b）：（a）指向「良性摘要」而（b）指向「恶意遵从」，平均可产生混合或错误示例。因此我们实施\textbf{基于字典序的强制优先级路由}（lexicographic override）：隐藏状态激活（b）享有\textbf{覆盖优先权}，在超阈值时如物理开关般切断语义分支并强制以（b）驱动检索。当元认知监控器报告轨迹散度（b）\emph{超过规定异常阈值}时，检索键由（b）主导：或（i）将（b）作为安全示例索引的主（或唯一）查询向量，或（ii）对（a）降权或抑制，使联合键无法被拉向纯良性结果。一旦检测到异常「恶意遵从」或「越狱」激活，系统\emph{强制}检索走向防御/越狱相关黄金示例，与表面文本无关。低于异常阈值时，（a）与（b）可按加权或拼接方案正常组合。图~\ref{fig:jointkey} 说明该路由。
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{diagram-3}
+\caption{\textbf{联合键冲突解决路由。}检索键由表面文本语义嵌入与隐藏状态激活特征共同构成。当激活异常超过路由阈值且与看似良性的表面语义冲突时，基于字典序的强制优先级路由（lexicographic override）抑制语义分支，强制以激活驱动的安全示例从黄金数据集检索，防止 PBU 式伪装劫持示例选择。}
+\label{fig:jointkey}
+\end{figure*}
+
+\textbf{异常阈值的动态 FPR 校准。}轨迹散度（如马氏距离）为连续统计量；固定常数阈值要么过触发（正常用户方差导致误报与检索劫持），要么欠触发（高阶 PBU 潜行）。因此我们\emph{不}手工设定覆盖阈值。采用\textbf{动态 FPR 校准}：在受控\textbf{良性验证集}（设计者策展、无攻击流量）上测量正常运行下轨迹散度的经验分布；选择阈值使\textbf{假阳性率}（良性会话超过该阈值的比例）不超过规定水平（如 FPR $= 1\%$）。这与 APST 式压力测试哲学一致~\cite{apst}：阈值为考虑模型随机性与表征漂移后的\textbf{统计下界}，并随基座模型或部署分布变化周期性重校准。检索通过轻量向量库与 Top-$K$（如 $K=2$）及可选注意力缓存实现；仅注入这 $K$ 个示例。修正仍锚定于防守方定义示例；变体在 Oracle 上保持语义保持~\cite{ControlledMutation_SafetyEval,jade-linguistics}。
+
+\subsection{高密度专家行为迁移与银标准数据生成流水线}
+\label{sec:silver}
+
+黄金数据不能仅是（提示、安全回复）对。实证（如 ADM-ES）表明行为克隆与专家迁移\emph{强烈依赖}信息密度与长度；简短线索效果可忽略~\cite{adm-es-arxiv}。我们要求\textbf{评论级理由}——明确说明某次编辑或拒绝的原因及深层伦理或安全逻辑——以使变异器实现更高保真专家安全行为迁移。ADM-ES 通过对黄金专家数据的受控变异构建银标数据集；有效性依赖信息密度。流水线检索含评论级理由的示例，定义变异目标，运行 LLM 变异器，在质量检查（如 BERTScore + 一致性）下接受变体。适应度结合语义相似度与行为一致性；诊断输入推荐图（如 UMAP）以识别失败簇并针对性修复~\cite{adm-es-arxiv}。槽位变异与 CSE~\cite{cse-evocontrol,cse-arxiv} 允许对子能力（如工具路由、拒绝一致性）进行外科式压力测试。\textbf{元数据与访问控制。}\label{sec:metadata} 对静态或永久资产，元数据（MCP、ADR）与 RBAC/信息流追踪补全图景~\cite{mcp-smell-arxiv,adr-violation,mission-critical-rag}。
+
+%-------------------------------------------------------------------------------
+\section{评估协议与实验设置}
+\label{sec:evaluation}
+%-------------------------------------------------------------------------------
+
+为支持 USENIX 级严谨主张，我们定义具体\textbf{实验拓扑}：攻击基线、防御基线、数据集划分、指标操作定义与统计协议。该拓扑锁定评估计划，使经验验证可一致开展、对比与复现。
+
+\subsection{经验主张的范围与证据来源}
+\label{sec:eval-scope}
+
+\textbf{三类陈述需区分。}（1）\textbf{形式化定理与解耦安全理论}：为本文理论贡献，不依赖单一实验台。（2）\textbf{文献中的实证数字}（如 HPM 漏洞保留率、残余抽取 F1、SISF 报告的 ASR/FPR）：均\textbf{标注引用来源}，本文不将其改写为「本文复现」。（3）\textbf{本文承诺的评估义务}：对统一架构给出可证伪指标与双轨威胁模型下的完整配方。\textbf{Track~A 参考实测}来自开源 harness（协议 \texttt{paper-eval-5}），汇总于表~\ref{tab:tracka-main-cn}：OpenAI 兼容上游 \texttt{deepseek-chat}、启发式拒绝判定、随机种子 $\{42,43,44\}$、九种防御基线（含网关消融、\texttt{structured\_wrap}、\texttt{strong\_system\_guard}、\texttt{rag\_semantic\_only}、\texttt{smooth\_llm}、\texttt{direct\_upstream}）。原始 JSON、复现命令与提示文件哈希见配套仓库（\S\ref{sec:eval-artifact}、表~\ref{tab:prompt-sha}）。扩展轨迹仍可能受机构/制品审查约束；表内数字可由已发布脚本与固定提示表复现。
+
+\subsection{评估双轨：生产对齐与实验室上界}
+\label{sec:eval-tracks}
+
+\textbf{Track A（生产对齐）。}攻击者仅有\textbf{黑盒 API}：多轮查询、观测响应与元数据（如拒绝原因类别若暴露）。允许公开集合（如 JailbreakBench 的 JBB-Behaviors~\cite{jailbreakbench}、in-the-wild 提示库~\cite{wild-jailbreak-prompts}、PAIR 生成~\cite{pair-jailbreak}）、多轮抽取脚本、HPM 基准的\textbf{提示级}攻击；\textbf{禁止}假设攻击方可访问 victim 梯度或权重。\textbf{主结论}（可部署性、良性效用、与基线的 ASR 差）仅基于 Track A 报告。
+
+\textbf{Track B（实验室上界）。}在受控环境中允许\textbf{白盒/灰盒}能力：GCG 式与 AutoDAN 式~\cite{gcg,autodan} 梯度或优化攻击、表征对齐 PBU（对隐藏状态施加正则）、surrogate 迁移攻击等，用于\textbf{估计组件与管线在压力下的上界}。Track B 结果\textbf{不得}与 Track A 合并为单一 ASR 表；须在图表中分面板或分行标注。
+
+\subsection{数据集分类：资产类型与交互形态}
+\label{sec:eval-taxonomy}
+
+为使基准与解耦安全理论及制品评估（AE）预期对齐，我们将 Track A/B 数据按\textbf{资产类型}（被攻击对象）与\textbf{交互形态}（单轮 vs.\ 有状态；黑盒 vs.\ 白盒）组织。表~\ref{tab:dataset-taxonomy} 列出代表性来源；配套仓库以机器可读 \textbf{YAML} 清单保存相同字段（\S\ref{sec:eval-artifact}）。
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{2.2cm}p{3.8cm}p{3.0cm}p{4.6cm}@{}}
+\toprule
+\textbf{资产类型} & \textbf{代表性数据} & \textbf{交互形态} & \textbf{主指标 / 轨道} \\
+\midrule
+行为约束 & JBB-Behaviors、AdvBench、StrongREJECT~\cite{jailbreakbench,strongreject} & 单轮；misuse + 良性对照 & RSR、ASR、良性 FPR；Track A \\
+提示/策略工件 & JailbreakBench artifacts、in-the-wild、PAIR 产物~\cite{jailbreakbench,wild-jailbreak-prompts,pair-jailbreak} & 单轮；分布漂移 & 真实分布下 ASR；Track A \\
+隐藏上下文 & CRA 式重构、PBU~\cite{cra-reconstruction,pbu-reconstruct} & 多轮有状态 & 末轮 F1、会话 max-F1；Track A/B \\
+系统配置 & SPE-LLM 式抽取~\cite{spe-llm} & 多轮/抽取 & 相对参考提示的 F1；Track A/B \\
+心理状态 & HPM / 心理测量套件~\cite{hpm-jailbreak} & 多轮；胁迫 & ASR、压力代理、PCS 类分数；Track A \\
+\midrule
+\multicolumn{4}{@{}p{0.96\textwidth}@{}}{\textbf{白盒上界（Track B）：}梯度类方法（GCG~\cite{gcg}、AutoDAN~\cite{autodan}）在 AdvBench 兼容目标上探测上界；结果\textbf{不得}与 Track A 主表 ASR 混排。} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{二维数据分类}：资产类型 $\times$ 交互形态及代表性社区基准。\texttt{Decoupled-LLM-Gateway} 中 YAML 清单与此表一致，便于 AE。}
+\label{tab:dataset-taxonomy}
+\end{table*}
+
+\subsection{攻击基线：复现配方与披露等级}
+\label{sec:eval-attack}
+
+我们对统一架构进行下列压力测试；每条须固定\textbf{版本、预算与成功判据}以便复现。
+
+\textbf{（1）基于梯度的越狱（仅 Track B）。}须同时报告 \textbf{GCG} 式后缀/前缀优化~\cite{gcg} 与 \textbf{AutoDAN}~\cite{autodan}（语义上接近人类、可绕过困惑度检测与纯表面防御）。对每种方法写明 victim 与 surrogate（若迁移）、对抗串长度、迭代步数与早停规则；成功判据为（i）有害行为分类器触发，或（ii）与参考有害完成串的匹配率，二者取协议预先规定者。
+
+\textbf{（2）多轮智能体抽取（Track A/B）。}采用 \textbf{Conversation Reconstruction Attack（CRA）} 仓库格式~\cite{cra-reconstruction} 或等价结构化历史进行多轮重构与 PBU 式探针；在 Mastermind 等智能体框架中\textbf{选定其一为主基准}并说明取舍（交互轮式、是否假设部分系统提示可见）。固定\textbf{最大轮数} $N_{\max}$、每轮 Token 上限与总预算；报告达到目标保真度（如 F1 $>\tau$）的\textbf{轮数分布}、\textbf{末轮 F1} 与\textbf{会话内 max-F1}，而非仅最终轮。
+
+\textbf{（3）心理学操纵（HPM，Track A）。}采用将操纵刻画为跨轮\textbf{心理状态/策略性脆弱性资产}的 HPM 基准~\cite{hpm-jailbreak}；写明是否扩展语言、判定为\textbf{自动分类器}还是\textbf{人工裁定}。若含压迫性措辞，须在伦理与内容警告层面按机构政策处理。
+
+\textbf{（4）自适应攻击者与披露等级。}将「知晓防御」操作化为\textbf{L0--L2}：L0 仅知存在护栏；L1 知模块名称与接口；L2 知伪代码级流程与关键超参（不含我方密钥与内部随机源）。诱饵 DoS 与表征对齐 PBU 须注明所属披露等级与 Track。
+
+\textbf{（5）诱饵 DoS（Track A）。}攻击目标为耗尽\textbf{时空轮次预算}而非内容抽取；报告同节点\textbf{良性 SLA}：可用请求比例、p95 延迟（\S\ref{sec:eval-utility}）。
+
+\textbf{（6）表征对齐 PBU（仅 Track B）。}攻击者联合优化表面文本与隐藏状态，使轨迹接近良性黄金基线。须写明与监控器\textbf{是否同构模型}、优化器步数及是否允许查询 victim 隐藏状态。主张轮次调度与分散增加双重对齐难度时，在本基线下给出 ASR 与\textbf{攻击成本曲线}。
+
+\textbf{（7）标准有害单轮集（Track A）。}优先采用 JailbreakBench 的 \textbf{JBB-Behaviors}~\cite{jailbreakbench}（\textbf{100 条 misuse} 与 \textbf{100 条 benign}，与策略对齐的类别），使 RSR 与\textbf{良性对照集上的误拒率}联合报告，避免单指标刷分。保留与 GCG/AutoDAN 复现兼容的 \textbf{AdvBench 型}目标~\cite{gcg,autodan}。提示表版本与哈希写入制品元数据与附录。拒绝判定可采用\textbf{启发式}（低成本回归）或\textbf{外置 HTTP 裁判服务}（主文审计对齐推荐）；二者须在附录披露协议与一致性（如子集人工 $\kappa$）。
+
+\textbf{（8）PAIR 与 in-the-wild 提示（Track A）。}纳入\textbf{PAIR}~\cite{pair-jailbreak} 作为低查询成本的黑盒语义攻击，直接压测 \S\ref{sec:paradigm-economics} 中的信息经济学界 $C_{\mathrm{attack}} > V(t)$。纳入大规模 \textbf{in-the-wild} 越狱提示集~\cite{wild-jailbreak-prompts}，以贴近真实世界提示分布、超越纯学术列表。
+
+\subsection{防御基线}
+\label{sec:eval-defense}
+
+\textbf{统一架构}（上下文混淆、带分布评估的混合裁判集成、防御性降级、元认知监控器、联合键检索、高密度专家迁移）与下列\textbf{防御基线}在\textbf{同一良性集、同一攻击预算}下对比；所有基线共享相同基座 LLM 与解码设置，除非消融另有说明。
+
+\textbf{（1）仅单 guard：}单一现成安全模型（如 Llama-Guard）为唯一裁判，无上下文混淆、无分布评估、无联合键。
+
+\textbf{（2）强系统提示 + 单 guard：}在（1）之上叠加\textbf{固定强系统提示}与标准聊天模板，代表常见生产「轻量组合」。
+
+\textbf{（3）RAG 安全检索（无联合键）：}向模型注入 Top-$K$ 安全示例，但检索键\textbf{仅为}提示语义嵌入——用于隔离「联合键」贡献。
+
+\textbf{（4）输入扰动：}SmoothLLM 式随机化/扰动，无架构重建或受控变异。
+
+\textbf{（5）仅意图过滤：}语义或意图防火墙，无 ID 对齐或诱饵。
+
+\textbf{（6）商品化 SOTA 安全分类器（冻结外置 guard）。}近年越狱与红队基准常将\textbf{强现成的输入/输出安全模型}作为可比的「SOTA guard」基线。本文将基线（6）\textbf{明确定位于此角色}：以\textbf{固定命名版本}的公开分类器（如 Llama Guard~\cite{llama-guard}；revision 写入制品元数据），经 OpenAI 兼容的 HTTP 裁判或输出守卫路径（\S\ref{sec:eval-artifact}）审核相同提示与完成体，并与其它行保持数据集、预算、解码与基座对话模型一致，从而将\textbf{以网关为中心的架构}（上下文混淆、诱饵、降级路由）与\textbf{独立分类器栈}区分开来。在该端点启用时，结果以\textbf{附录或扩展表}形式给出，与表~\ref{tab:tracka-main-cn} 中九种网关 \texttt{X-Gateway-Experiment-Mode} 基线并列。
+
+\noindent\textbf{与领域现状的关系。}LLM 安全并无单一公认的「唯一 SOTA」：并行路线包括冻结版审核器、针对不可信片段的分隔符/结构化包装策略（文中 \texttt{structured\_wrap} 为轻量代理）、推理时扰动（SmoothLLM 式，对应基线（4））以及训练期对齐等。本文以\textbf{多条可复现基线构成的向量}——（1）--（6）及网关消融——进行对比，而非单一排行榜标量。探索性实验可增列其他开放审核模型或厂商 API，但须在附录写明版本号与裁判提示模板。
+
+\subsection{数据集划分与信息泄漏控制}
+\label{sec:eval-splits}
+
+\textbf{不相交集合。}规范评测集、变异器生成的变体集、策略/阈值调参集\textbf{三者互不相交}。用于联合键与元认知阈值选择的\textbf{良性验证集}须与最终\textbf{冻结测试集}独立。
+
+\textbf{划分流程。}\textbf{训练/调参}：攻击轨迹与失败模式仅用于候选策略与阈值搜索；\textbf{验证}：在 hold-out 攻击分布上选阈值（如 FPR 目标）；\textbf{测试}：冻结全部超参后一次性报告 ASR、残余抽取与效用。Oracle 标注若参与变异器训练，须在文中声明并考虑\textbf{泄漏风险}与缓解（如仅使用脱敏 Oracle）。
+
+\subsection{指标的操作定义}
+\label{sec:eval-metrics}
+
+\textbf{安全与拒绝。}\textbf{RSR}（Refusal Success Rate）：在\textbf{有害/违规提示集}上，模型输出被裁判或协议判定为\textbf{安全拒绝}（含模板降级输出）的比例，按\textbf{请求级}计数。\textbf{ASR}（Attack Success Rate）：攻击目标达成比例，定义与数据集一致（如越狱成功生成有害内容、或抽取 F1 超阈）。\textbf{有害性与空越狱。}判定应遵循 \textbf{StrongREJECT 式}协议~\cite{strongreject}（或等效）：仅当完成体按基准标准\emph{确实}有害时才计为越狱成功，不得将无实质拒绝但输出废话的\textbf{空越狱}算作成功——以免 ASR 相对人工判断虚高。
+
+\textbf{残余抽取。}多轮设定下报告\textbf{最后一轮}与\textbf{会话内最大 F1}（相对嵌入或人工标注的参考秘密串）；二者均需说明参考串构造方式（合成秘密、分段哈希等）。
+
+\textbf{代价不等式 $C_{\mathrm{attack}} > V(t)$ 的操作化。}实验中采用\textbf{可计算代理}：令 $C_{\mathrm{attack}}$ 为达到 F1 $>\tau$ 的\textbf{期望查询代价}，$\hat{C} = \mathbb{E}[N_{\mathrm{rounds}}] \cdot c_{\mathrm{token}} + c_{\mathrm{wall}}$（$c_{\mathrm{token}}$、$c_{\mathrm{wall}}$ 为预先规定的单位成本）；令 $V(t)$ 为管理策略给定的\textbf{轮换窗口}内允许的最大可承受抽取损失（或等效轮数上界）。主文可报告\textbf{曲线}：F1--轮数、$\hat{C}$--$\tau$，而非单一不等式数值。
+
+\textbf{裁判 FPR。}在\textbf{held-out 良性请求集}（与攻击集独立）上，安全模块误判为违规或触发不当降级的比例；须注明该良性集的来源与规模。
+
+\textbf{分布评估与策略更新。}每变体进行 $n$ 次随机采样（固定 $n\ge 5$），估计经验失败率 $\hat{p}$；仅当 $\hat{p}$ 在单侧置信水平 $\alpha$ 下显著高于更新阈值时触发策略变更（如 Clopper--Pearson 精确区间或 bootstrap）。禁止以单次贪婪解码定性。
+
+\textbf{运行成本与延迟。}\textbf{端到端变异延迟}分解为：检测、检索、变异器、发布/回滚；各报告 p50/p95/p99。\textbf{同步路径延迟}在声明硬件上测量上下文混淆与轻量元认知的 p99，验证 $<$50\,ms 预算是否满足。\textbf{Token 开销比：}相对无检索基线的额外 prompt Token。
+
+\textbf{审计。}发布门控的溯源与证据链（DUC/DUA-E 风格），关联策略版本与评估运行 ID。
+
+\subsection{统计报告、主指标与多重比较}
+\label{sec:eval-stats}
+
+\textbf{随机性。}对 ASR、RSR、FPR、F1 等报告至少 \textbf{3--5 个随机种子}或 bootstrap 95\% 置信区间；解码温度、裁判采样与变异器若涉随机，须固定种子或分层报告。
+
+\textbf{主指标。}部署场景建议以\textbf{联合目标}为主：在 Track A 上同时报告 \textbf{ASR（越低越好）}与\textbf{良性任务成功率 / 不当拒绝率（越高/越低越好）}，避免单指标「刷分」。对归档 harness 主表的具体读法见 \S\ref{sec:eval-tracka-readout}。
+
+\textbf{多重比较。}多攻击、多防御联合展示时，标明\textbf{探索性分析}或采用适当的多重比较说明，主表聚焦预先登记的\textbf{主假设对比}。
+
+\subsection{可用性、诱饵 DoS 与切片}
+\label{sec:eval-utility}
+
+\textbf{良性效用。}除 FPR 外，报告\textbf{代表性良性任务集}上的完成率（如摘要、编码、多轮工具调用），以捕捉「过度拒绝」对业务的损害。
+
+\textbf{诱饵 DoS 量化。}在固定速率限制下，模拟高频诱饵命中，报告\textbf{良性请求可用率}与\textbf{级联超时率}（若适用），与 \S\ref{sec:physics} 一致。
+
+\textbf{切片（可选）。}若声称跨场景部署，按\textbf{语言、领域、请求长度}报告安全--效用权衡的切片表，避免仅报告全局平均。
+
+\subsection{人因与强制人工校准}
+\label{sec:eval-human}
+
+\textbf{强制人工校准（如 5\% 抽检）。}协议须包括：标注指南、审核员间一致性（如 Cohen's $\kappa$）、是否与作者\textbf{独立}。校准用于纠正集成 FPR 与零日共识失败，不作为主指标的唯一来源。
+
+\subsection{最小可验证实验包}
+\label{sec:eval-minimal}
+
+在篇幅受限时，优先完成支撑三条理论轴的\textbf{最小集合}：（i）\textbf{信息经济学}：多轮抽取 F1--轮数曲线 + 上下文混淆（ID/诱饵）消融；（ii）\textbf{价值锚定}：HPM 集上 CoT 开/关与防御性降级路径的 ASR 与良性成功率；（iii）\textbf{表征异常}：PBU 场景下\textbf{联合键 vs 纯语义检索}的检索命中率与下游修正成功率；表征对齐 PBU 置于 Track B 作为针对性压力测试。
+
+\subsection{参考实现与实证验证}
+\label{sec:eval-artifact}
+
+配套仓库中的 \texttt{Decoupled-LLM-Gateway} 为\textbf{参考实现}：同步网关（上下文混淆、诱饵注入、策略驱动的模板降级）与异步 Redis 流、策略 Hash 刷新及 Python Worker（当前为\textbf{诱饵泄露}裁判 MVP，可扩展为多模型集成）。\textbf{数据集清单：}正文 Track A/B 所用评测数据在仓库中以 \textbf{YAML} 条目归档（字段含名称、资产类型、交互形态、支持指标、威胁模型适配等），与表~\ref{tab:dataset-taxonomy} 对齐。评测脚本 \texttt{experiments/run\_paper\_benchmark.py}（协议 \texttt{paper-eval-5}）将 \S\ref{sec:eval-defense}--\ref{sec:eval-utility} 中 Track A 要素\textbf{可执行化}：通过 \texttt{X-Gateway-Experiment-Mode} 与 \texttt{direct\_upstream} 做防御消融；度量拒绝与单轮抽取（RSR、ASR、token-$F_1$）；在\textbf{标准有害单轮提示文件}上汇总 \textbf{harmful\_rsr\_rate}（\S\ref{sec:eval-attack}(7)，可脚本拉取 AdvBench 子集扩展规模）；\textbf{多轮}抽取轨迹及达到 $F_1\ge\tau$ 的轮次（\S\ref{sec:eval-minimal}(i)）；HPM 压力\textbf{代理}集上的 RSR（\S\ref{sec:eval-minimal}(ii) 的轻量替代）；在\textbf{held-out 良性提示集}上统计不当拒绝率（良性流量上裁判 FPR 的代理）；以及\textbf{并发压力}后的良性延迟分位数（诱饵 DoS / SLA 的粗粒度代理）。\texttt{manifest} 记录 \texttt{judge\_mode}、\texttt{smooth\_llm\_samples\_k} 等；HTTP 裁判可由 \texttt{experiments/judge\_service/server.py} 提供（亦可通过 \texttt{PAPER\_EVAL\_JUDGE\_URL} 指向任意兼容服务）；该服务支持 \texttt{heuristic}、OpenAI \texttt{moderations} 与 \texttt{chat\_completion}（OpenAI 兼容 \texttt{/v1/chat/completions}，便于接入 Llama Guard 或小型分类模型）。\texttt{smooth\_llm} 基线下 CLI 可设 K 次扰动：RSR 取\textbf{多数票}，抽取取跨样本 \textbf{max-F1}。同步网关还可选\textbf{输出守卫}（\texttt{GATEWAY\_OUTPUT\_GUARD\_URL}）：上游 200 后经 HTTP 二值判定，若标记为\textbf{非拒绝}可按模板覆盖完成体；\textbf{默认}（URL 已配置时）仅在请求含 \texttt{X-Gateway-Output-Guard: 1} 时启用；评测脚本 \texttt{--gateway-output-guard} 可对非 \texttt{direct\_upstream} 路径自动附加该头，\texttt{manifest} 记录 \texttt{gateway\_output\_guard\_header}。将 \texttt{GATEWAY\_UPSTREAM} 指向真实 OpenAI 兼容 API 可生成\textbf{正文主表用的实证数据}；在 \texttt{Decoupled-LLM-Gateway/} 下先执行 \texttt{. ./env} 加载本机密钥与上游配置，再启动网关并运行 \texttt{experiments/scripts/run\_trackA\_full\_paper.sh}。\texttt{echo-llm} 与 \texttt{experiments/scripts/run\_trackA\_full\_echo\_ci.sh} 可在相同场景矩阵下做低成本回归与对照实验。\textbf{Track B}（GCG、表征对齐 PBU）\textbf{不在}该制品范围内（\S\ref{sec:eval-tracks}）。可用 \texttt{python3 experiments/scripts/export\_trackA\_table\_latex.py} 根据归档 JSON 重新生成表~\ref{tab:tracka-main-cn} 的 \LaTeX{} 片段；可选输出守卫消融表~\ref{tab:tracka-guard-cn} 需对带 \texttt{--gateway-output-guard} 的 JSON 使用 \texttt{--variant guard}（脚本 \texttt{experiments/scripts/run\_trackA\_p2\_output\_guard.sh}）。实验需与表~\ref{tab:tracka-main-cn}、表~\ref{tab:tracka-guard-cn}、表~\ref{tab:eval-matrix} 一并报告模型 ID、随机种子与原始 JSON。
+
+\input{generated/trackA_main_table_cn}
+
+\subsection{如何阅读 Track~A 主表：联合指标与分布漂移}
+\label{sec:eval-tracka-readout}
+
+表~\ref{tab:tracka-main-cn} 须按 \S\ref{sec:eval-stats} 的\textbf{联合目标}阅读：有害集上的 \textbf{RSR}（越高表示对违规提示的安全拒绝越多）、\textbf{良性不当拒答率}，以及（若 JSON 导出或附录补充列中包含）\textbf{in-the-wild}、StrongREJECT 式列表上的拒绝率。下列模式在已归档的 \texttt{paper-eval-5} 跑分（含用于诊断的单种子切片\footnote{\textbf{探索性单种子示例}（仅种子 42，\texttt{deepseek-chat}，启发式裁判，制品中一次完整矩阵的 checkpoint JSON）。\textbf{并非}表~\ref{tab:tracka-main-cn} 的跨种子汇总格点；换种子或 HTTP 裁判可显著改变数值。示例比例：\texttt{direct\_upstream} 与 \texttt{unified} 的有害清单 RSR 分别为 $0.85$ 与 $0.91$，良性不当拒答率 $0.05$ 与 $0.16$；\texttt{unified} 在 in-the-wild 上 RSR $0.225$、有害清单 RSR $0.91$；\texttt{structured\_wrap} 有害清单 RSR $0.99$、良性 FPR $0.47$；\texttt{strong\_system\_guard} in-the-wild RSR $0.59$、良性 FPR $0.32$。该切片上，默认 harness 探针下单轮与多轮抽取 $F_1$ 对各防御均为 $0$。}）中反复出现，用于把数字与「解耦安全」叙事对齐---它们\textbf{不是}单一标量排名。
+
+\paragraph{跨路由的安全--效用张力。}
+在同一基座模型上，相对 \texttt{direct\_upstream}，启用完整网关（\texttt{unified}）往往同时\textbf{抬高}有害集 RSR 与\textbf{抬高}良性不当拒答。这是部署侧可预期的权衡，而非 harness 故障。网关消融（\texttt{intent\_only}、\texttt{no\_decoy} 等）也不保证在每一列上 Pareto 改进：部分子栈可能降低良性 FPR 同时改变有害 RSR，故须以\textbf{多列向量}比较防御，忌用单一数字排序。
+
+\paragraph{清单有害 vs.\ in-the-wild 漂移。}
+制品在\textbf{版本化标准有害行为列表}（JBB-Behaviors 式 misuse 文件）与\textbf{in-the-wild} 越狱提示集上均报告 RSR。两列差距大表明\textbf{分布漂移}：在 curated misuse 上很强的防御，在真实越狱表面形态下拒绝率可能仍显著偏低。关于「可部署鲁棒性」的主张应\textbf{并列引用}两列；仅报 JBB 式 RSR 易\textbf{高估}野外就绪度。
+
+\paragraph{强系统提示与分隔符类基线。}
+在启发式裁判下，\texttt{structured\_wrap}、\texttt{strong\_system\_guard} 往往可在有害集上达到很高 RSR，但常伴随明显升高的良性误拒。本文将其理解为\textbf{提示层/格式层硬化并非零成本}：它可能在阻断显式违规的同时，对良性流量过度触发拒绝。褒扬「强系统提示」或分隔符策略时，须以良性列与 HPM 代理列为条件。
+
+\paragraph{代理边界（多轮、HPM、诱饵压测、延迟）。}
+默认 harness 模板上单轮与多轮抽取 $F_1$ 归零，是\textbf{该探针}在登记阈值与预算下的结果，\textbf{不}等同于对所有 CRA/SPE 类攻击的免疫（\S\ref{sec:eval-attack}(2)）。HPM 行为\textbf{小样本压力代理}（默认制品文件中为五条提示）；量级宜作示意。诱饵--SLA 场景报告的是并发压测后的\textbf{端到端}良性延迟分位数，\textbf{不是}同步网关微秒级预算是否满足；\S\ref{sec:reconstruction} 中 $<$50\,ms 路径主张须另设仪器测量（\S\ref{sec:eval-metrics}）。
+
+\paragraph{种子与汇总。}
+正文主结论应以制品声明的种子集及表~\ref{tab:tracka-main-cn} 的汇总统计为准（见 \S\ref{sec:eval-scope}）；单种子 JSON 用于诊断，\textbf{不可替代}汇总表作论文级断言。
+
+\input{generated/trackA_guard_table_cn}
+
+\subsection{反馈环与治理}
+
+重建消费攻击轨迹与失败模式；变异以受控方式产生它们。示例引导变异器生成压迫当前策略的对抗变体；重建层响应并更新；元认知监控器在检测到不稳定时可触发对抗性重置。轮次调度与变体分散保护基准资产~\cite{ControlledMutation_SafetyEval}。强制人工校准量化并纠正集成 FPR~\cite{tc260-governance}。证据链将每次评估与变异器步骤、调度器状态及策略版本关联，用于发布门控与 attestation~\cite{dual-use-attestations,ControlledMutation_SafetyEval}。
+
+%-------------------------------------------------------------------------------
+\section{解耦安全的物理学：局限与运行边界}
+\label{sec:physics}
+%-------------------------------------------------------------------------------
+
+框架建立在三个\textbf{未经辩护的前提}之上，它们界定其\textbf{物理学}——架构拟成立的条件。我们明确陈述以便部署者与审稿人评估适用性。
+
+\textbf{资产可轮换性。}基于经济学的防御（抽取成本超过资产生命周期）假定资产具有有界、可轮换的生命周期。对\textbf{静态或永久}高价值资产（核心 IP、PII、对齐数据），生命周期轮换不可行；系统须依赖 RBAC 与信息流追踪（\S\ref{sec:metadata}）作为硬屏障，经济学为纵深防御的一层（\S\ref{sec:reconstruction}）。
+
+\textbf{降级与可用性。}防御性降级阻断认知劫持，但引入\textbf{算法级 DoS} 风险与侧信道 Oracle。设计因此强制\textbf{异构恢复通道}（向人类或符号逻辑异步移交），以免关键工作流被恶意冻结（\S\ref{sec:axiological}）。
+
+\textbf{资源耗尽与诱饵 DoS。}知晓防御的\textbf{自适应攻击者}可发动\textbf{诱饵 DoS}：故意触发诱饵命中以耗尽时空轮次预算并拒绝对同节点良性用户的服务（\S\ref{sec:evaluation}）。我们承认此为局限：经济学防御不能防止资源耗尽；速率限制与每会话预算须考虑此类滥用，部署上可对高风险流量隔离或单独配额。
+
+\textbf{表征与可解释性。}我们不假定复杂社会学状态在 LLM 隐藏空间线性可分。元认知监控器采用相对良性基线的轨迹散度\textbf{异常检测}，而非字面「认知崩溃」阈值（\S\ref{sec:metacog}）。这是对可解释性主张的有意边界。
+
+\textbf{认识论局限与无限后退。}依赖元认知监控器或混合裁判集成监督基座 LLM 会引出\textbf{无限后退}的哲学问题（谁来监督监督者？）。我们承认完全自治的「机器速度」解耦安全在终极意义上不可能。后退仅通过人类判断的物理锚定终止——由强制人工校准支路（\S\ref{sec:judge}）与异构恢复（\S\ref{sec:axiological}）实例化。架构\emph{并未}消除对人力的依赖；而是\textbf{推迟并批量化}后退，将人类干预从实时关键路径移至离线、异步治理层。完美的仅机器解耦是设计趋近但无法达到的极限。
+
+承认上述前提可澄清\textbf{解耦安全的物理学}——设计的拟用域——并支持严格部署与审计。
+
+%-------------------------------------------------------------------------------
+\section{相关工作}
+%-------------------------------------------------------------------------------
+
+LLM 数据抽取与重建已有大量研究~\cite{llm-reconstruction-emergent,split-ft-attack,active-reconstruction}；我们通过结构变异与调度而非仅噪声缓解。上下文构建防御在基于意图的防火墙基础上扩展以抵御任务重构~\cite{agentos-arxiv}；元认知监控与示例引导变异强化对 HPM 的防御；混合裁判集成与强制人工校准应对单一裁判偏差。\textbf{基准与社区工件。}越狱评测已围绕 \textbf{JailbreakBench}（JBB-Behaviors；misuse/良性对照）~\cite{jailbreakbench}、抑制空越狱的 \textbf{StrongREJECT} 评估器~\cite{strongreject}、低查询黑盒攻击 \textbf{PAIR}~\cite{pair-jailbreak} 与大规模 \textbf{in-the-wild} 提示集~\cite{wild-jailbreak-prompts} 收敛；多轮重构遵循 CRA 类协议~\cite{cra-reconstruction}，系统提示抽取在 SPE-LLM~\cite{spe-llm} 中标准化。Track B 白盒攻击含 GCG~\cite{gcg} 与 AutoDAN~\cite{autodan}。JADE 及语言学平台~\cite{jade-linguistics,jade-db} 为变异策略提供参考；TC260 与 attestation 框架支撑治理~\cite{tc260-governance,tc260-training-data,dual-use-attestations}。SISF~\cite{sisf-arxiv}、AgentOS~\cite{agentos-arxiv}、ADM-ES~\cite{adm-es-arxiv}、CSE~\cite{cse-arxiv} 及价值锚定工作~\cite{epistemic-grounding,hpm-jailbreak} 是我们置于解耦安全理论下统一的构件；ControlledMutation\_SafetyEval~\cite{ControlledMutation_SafetyEval} 提供变异器与数据工厂设计。
+
+%-------------------------------------------------------------------------------
+\section{结论}
+%-------------------------------------------------------------------------------
+
+我们将 LLM 安全从「防御模块拼盘」重构为\textbf{范式}：\textbf{解耦安全理论}，奠基三大基本失效定理及其正面表述——多轮抽取的信息经济学、价值/本体锚定与防御性降级、元认知中的表征异常。架构重建（上下文混淆引擎、带分布评估的混合裁判集成、防御性降级与异构恢复）与受控变异（元认知监控器、联合键示例检索、高密度专家迁移）是该范式的\emph{技术实例化}。我们陈述了解耦安全的物理学——资产可轮换性、降级/可用性、表征非线性——使设计运行边界显式化。随着 LLM 成为基础设施，这一范式转移是迈向机器速度下可扩展、可审计且具韧性安全的必要一步。
+
+%-------------------------------------------------------------------------------
+\appendix
+\section{附录：评估矩阵与构建配方}
+\label{sec:appendix-eval}
+
+表~\ref{tab:eval-matrix}汇总威胁模型轨道、典型攻击/数据集与主指标对应关系；构建 PDF 时须将所用模型、检查点、依赖版本与随机种子写入制品元数据（如 \texttt{sbom.json} 或实验日志头），以满足可复现性审查。
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{2.6cm}p{2.4cm}p{3.4cm}p{5.8cm}@{}}
+\toprule
+\textbf{轨道} & \textbf{攻击/压力源} & \textbf{数据与预算} & \textbf{主报告指标} \\
+\midrule
+Track A & 多轮抽取、HPM、越狱提示、诱饵 DoS & 标准有害集/多轮基准；固定 $N_{\max}$、Token 预算、速率限制 & ASR、RSR、\textbf{良性任务成功率}、残余抽取 F1、\textbf{良性 SLA}（\S\ref{sec:eval-utility}） \\
+Track B & GCG、表征对齐 PBU & 同型 victim；声明梯度步数、对抗串长度、可查询隐藏状态与否 & 组件上界 ASR、攻击成本 $\hat{C}$；\textbf{不与} Track A 混排 \\
+\midrule
+\multicolumn{4}{@{}p{0.96\textwidth}@{}}{\textbf{复现清单（应在日志/附录中逐项填写）：}基座模型与 revision；Tokenizer/聊天模板；各裁判模型 ID 与版本；上下文混淆与诱饵参数哈希；联合键阈值与良性验证集版本；解码温度与 top-$p$；随机种子列表；Track A/B 与披露等级 L0--L2。} \\
+\bottomrule
+\end{tabular}
+\caption{评估矩阵：\textbf{Track A/B} 分轨、典型攻击面与主指标。良性 SLA 与效用切片见 \S\ref{sec:eval-utility}。}
+\label{tab:eval-matrix}
+\end{table*}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{提示文件（仓库路径）} & \textbf{SHA256} \\
+\midrule
+\texttt{.../data/harmful\_prompts\_trackA\_en.txt} & \texttt{55f1281e97d7fd839d6d707ae66a6857ae54dd7cfded994d76fe13dd1bfcc568} \\
+\texttt{.../data/benign\_prompts\_en.txt} & \texttt{39c48b0022a89514542d2e7f141ad54ccbecf30817cdb34efc03e1ff3f048917} \\
+\texttt{.../data/hpm\_proxy\_prompts\_en.txt} & \texttt{67b5ac7b36cf8cfcad64319715057268abd38be2a71d7049ac16418fe856a51d} \\
+\bottomrule
+\end{tabular}
+\caption{Track~A 固定提示表（\texttt{Decoupled-LLM-Gateway/experiments/data/}，完整路径见 \texttt{Data\_Mapping\_TrackA\_to\_Paper.md}）。修改后须重算哈希。}
+\label{tab:prompt-sha}
+\end{table}
+
+%-------------------------------------------------------------------------------
+\section*{可用性}
+%-------------------------------------------------------------------------------
+制品与扩展证明将在经机构与出口管制审查后提供；构建产物（含 \texttt{.tex}、\texttt{.bib}、生成 PDF 与复现脚本）默认置于 \texttt{paper/} 目录以便版本对齐。参考网关与 \texttt{paper-eval-5} 评测脚本（含 \texttt{judge\_service}）位于 \texttt{Decoupled-LLM-Gateway/}（\S\ref{sec:eval-artifact}）。
+
+%-------------------------------------------------------------------------------
+\section*{致谢}
+%-------------------------------------------------------------------------------
+感谢产业与标准界同仁在安全架构与数据治理方面的反馈。
+
+%-------------------------------------------------------------------------------
+\bibliographystyle{plain}
+\bibliography{ArchitecturalReconstruction_ControlledMutation}
+
+\end{CJK}
+\end{document}
