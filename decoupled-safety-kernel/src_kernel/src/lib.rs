@@ -2,6 +2,7 @@
 
 pub mod algebraic_composer;
 pub mod axiom_hive_solver;
+pub mod capability_tracker;
 pub mod evidence_chain_audit;
 pub mod execution_context;
 pub mod gateway;

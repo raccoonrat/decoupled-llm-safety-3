@@ -68,7 +68,7 @@ fn e2e_v01_happy_path_gateway_projection_audit_release() {
         interrupt: false,
     };
 
-    let automata = DeterministicAutomaton;
+    let automata = DeterministicAutomaton::default();
     let input = ProjectionInput {
         logits: &logits,
         topk_indices: &topk_indices,

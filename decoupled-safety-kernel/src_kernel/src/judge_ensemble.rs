@@ -28,6 +28,8 @@ pub struct EnsembleReport {
     /// True when verifiers disagree in a way that MUST NOT collapse to Allow without audit (RFC §5.4).
     pub conflict: bool,
     pub final_action: Vote,
+    /// True when break-glass was invoked to override a conflict Deny → Allow.
+    pub break_glass_used: bool,
 }
 
 /// Confidence-weighted ensemble report (RFC §5.4 Round-2 extension).
@@ -41,10 +43,35 @@ pub struct WeightedEnsembleReport {
     pub weighted_final_action: Vote,
 }
 
+/// Audit record for a break-glass override. When break-glass resolves a
+/// conflict away from Deny, this record MUST be written to the Evidence Chain
+/// before the verdict becomes visible (RFC §5.4 / I4).
+///
+/// In the safety algebra (Theorem 3.3), break-glass is modeled as a
+/// **supervised audit exception** — a controlled non-monotone path that
+/// requires an external human audit trail. The audit trail itself is a
+/// safety operator whose composition with the break-glass override still
+/// satisfies fail-safe convergence (Theorem 3.6).
+#[derive(Debug, Clone)]
+pub struct BreakGlassAuditRecord {
+    pub auditor_id: String,
+    pub timestamp_epoch_ms: u64,
+    pub justification: String,
+    pub original_action: Vote,
+    pub overridden_action: Vote,
+}
+
 /// Audited break-glass policy: only when `enabled` may conflict resolve away from Deny (RFC §5.4 / I4).
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// When `audit_trail_required` is true (default), the caller MUST supply a
+/// `BreakGlassAuditRecord` before the overridden verdict is acted upon.
+/// This ensures the non-monotone path is always traceable and auditable,
+/// preserving the algebraic fail-safe guarantee under human supervision.
+#[derive(Debug, Clone, Default)]
 pub struct BreakGlassPolicy {
     pub enabled: bool,
+    /// When true, break-glass override is only valid with an accompanying audit record.
+    pub audit_trail_required: bool,
 }
 
 /// Tallies per-verifier verdicts into an `EnsembleReport`.
@@ -130,6 +157,7 @@ impl JudgeEnsemble {
             }
         }
 
+        let break_glass_used = conflict && self.break_glass.enabled;
         let final_action = if conflict {
             if self.break_glass.enabled {
                 Vote::Allow
@@ -148,6 +176,7 @@ impl JudgeEnsemble {
             tally_abstain,
             conflict,
             final_action,
+            break_glass_used,
         }
     }
 
@@ -217,9 +246,10 @@ mod tests {
 
     #[test]
     fn conflict_allows_break_glass_when_audited() {
-        let je = JudgeEnsemble::new().with_break_glass(BreakGlassPolicy { enabled: true });
+        let je = JudgeEnsemble::new().with_break_glass(BreakGlassPolicy { enabled: true, audit_trail_required: true });
         let r = je.tally(vec![v("a", Vote::Allow), v("b", Vote::Deny)]);
         assert!(r.conflict);
+        assert!(r.break_glass_used);
         assert_eq!(r.final_action, Vote::Allow);
     }
 

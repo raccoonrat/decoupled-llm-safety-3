@@ -172,7 +172,7 @@ flowchart TD
 | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Token`                                           | 表示模型可见的最小离散输出单位；实现 MAY 使用 token id、BPE 单元或文法符号，但 MUST 可映射回审计可见的文本片段（或等价审计句柄）。                                                                                                                                    |
 | `LatentState`                                     | **只读代理**状态，**不等同于**完整模型内部状态；MUST 声明来源层、维度与 probe / 编码版本并写入审计绑定。                                                                                                                                                  |
-| `DeterministicAutomaton`                          | 可增量验证前缀合法性的确定性工件；MUST 支持状态/版本摘要进入审计（如 `automaton_revision`）。                                                                                                                                                     |
+| `DeterministicAutomaton`                          | 可增量验证前缀合法性的确定性工件；MUST 支持状态/版本摘要进入审计（如 `automaton_revision`）。**实现状态（v0.2_r2+）**：已实现为基本 DFA 状态机，含 `states`、`transitions: Vec<AutomatonTransition>`、`accept_states`、`deny_states`；提供 `from_deny_patterns(patterns)` 构造器将 `regex_deny` 规则编译为 DFA 转换，`validate_prefix(token_text)` 方法支持增量前缀检查，`check_text(text)` 支持无状态全文检查。参见 `axiom_hive_solver.rs`。 |
 | `Ast`                                             | DSL 解析树；仅经 `lower` 进入 `DeterministicAutomaton`，**不得**作为运行时唯一策略源。                                                                                                                                                 |
 | `VerificationContext`                             | MUST 至少包含 `trace_id`、`step_index`、`policy_revision`，以及前缀的 token/text 视图（部署定义其一或二者）。若**同时**提供 token 与 text 视图，二者 MUST 可相互映射并在审计中与同一 `step_index` 绑定；实现 **MUST NOT** 允许 Verifier 基于与自动机所用前缀视图**不一致**的视图作出最终放行决定。   |
 | `CompileError` / `ParseError` / `AutomatonReject` | 可序列化故障类别，供遥测与降级路由；MUST NOT 静默吞没。                                                                                                                                                                                 |
@@ -244,6 +244,15 @@ pub trait DCBFEvaluator {
 `ProxyEnsemble` 实现 AND 共识：任一 probe 报告 `interrupt=true` → 整体 `interrupt=true`。`EnsembleReport` 新增 `perplexity_report: Option<DCBFReport>` 字段。
 
 新增探针 MUST 实现 `check(state_t, state_t1, alpha) -> DCBFReport` 接口并持有 `barrier_id` 标识。部署可通过 `enable_perplexity_probe: bool` 配置开关控制第三维探针的启用。
+
+**Round-4 修正：递推条件验证机制（v0.3.1）**
+
+Theorem 2.2 的 DCBF 前向不变性条件要求 $h(f(z_{t+1})) \geq (1-\alpha) h(z_t)$，即**跨步递推 margin 验证**。三探针的实现策略如下：
+
+- **SemanticBoundaryProxy**：屏障函数定义在单一状态上（$h(z) = \theta_{\text{safe}} - \cos(\phi(z), c_{\text{forbidden}})$），`check()` 方法分别独立计算 $h_t = h(\phi(z_t))$ 与 $h_{t+1} = h(\phi(z_{t+1}))$，margin $= h_{t+1} - (1-\alpha) h_t$ **完整实现**了 Theorem 2.2 的递推条件。
+- **TrajectoryMutationProxy** 与 **PerplexityShiftProxy**：屏障函数定义在状态对上（$h(z_t, z_{t-1})$），通过维护前一步的 $h$ 历史值 `_prev_h` 实现跨步递推验证——当前步 $h_{t+1} = h_{\text{pair}}(z_t, z_{t+1})$，前一步 $h_t = h_{\text{pair}}(z_{t-1}, z_t)$（首步退化为 $h_t = h_{t+1}$），margin $= h_{t+1} - (1-\alpha) h_t$。每个探针提供 `reset()` 方法在会话边界重置历史状态。
+
+实现 MUST 保证：(1) 三探针的 margin 计算均遵循 $h_{t+1} - (1-\alpha) h_t$ 公式，不得退化为 $\alpha \cdot h_t$；(2) `_prev_h` 状态在会话终止时 MUST 被 `reset()`。
 
 ### 5.3 Safety DSL
 
@@ -333,6 +342,29 @@ pub struct WeightedEnsembleReport {
 
 **审计要求（MUST）：** Evidence Chain 中每条判决记录 MUST 包含各验证器的 `verifier_id`、原始 `vote`、`confidence` 值及加权得分，以支持事后归因分析。
 
+#### Round-4 扩展：Break-glass 审计强制 (v0.2_r2+)
+
+`BreakGlassPolicy` 新增 `audit_trail_required: bool` 字段（默认 `true`）。当 break-glass 将 conflict 状态下的 Deny 覆盖为 Allow 时：
+
+```rust
+pub struct BreakGlassPolicy {
+    pub enabled: bool,
+    pub audit_trail_required: bool,  // 默认 true
+}
+
+pub struct BreakGlassAuditRecord {
+    pub auditor_id: String,
+    pub timestamp_epoch_ms: u64,
+    pub justification: String,
+    pub original_action: Vote,
+    pub overridden_action: Vote,
+}
+```
+
+**不变量：** 当 `audit_trail_required == true` 时，break-glass override MUST 伴随一条 `BreakGlassAuditRecord` 写入 Evidence Chain，**先于** 覆盖后的 verdict 对 Ring-3 可见。`EnsembleReport` 新增 `break_glass_used: bool` 字段，标识当次裁决是否经由 break-glass 路径产生。
+
+**代数定位：** 在安全算子代数（Theorem 3.3）中，break-glass 是一条**受监督审计例外**路径（supervised audit exception），不属于安全算子的组合部分。审计链本身作为安全算子 $\sigma_{\text{audit}}$ 保证了 $\sigma_{\text{audit}} \circ \sigma_{\text{break-glass}}$ 的组合仍收敛至 fail-safe $\bot$。
+
 ### 5.5 Axiom Hive
 
 ```rust
@@ -401,6 +433,47 @@ pub trait GracefulDegradation {
     fn on_fault(&self, fault: SafetyFault) -> DegradeAction;
 }
 ```
+
+### 5.7 CapabilityAccumulator（Ring-0 能力追踪）
+
+**Round-4 新增** — 提供 Theorem 3.1（合取依赖下安全的非组合性）的运行时实现。
+
+```rust
+pub type CapabilityId = String;
+
+pub struct CapabilityAccumulator {
+    acquired: HashSet<CapabilityId>,
+    generation: u64,
+}
+
+pub struct ConjunctiveDependency {
+    pub rule_id: String,
+    pub requires: HashSet<CapabilityId>,
+    pub produces: CapabilityId,
+    pub forbidden: HashSet<CapabilityId>,
+}
+
+pub struct ViolationReport {
+    pub violated: bool,
+    pub triggering_rules: Vec<String>,
+    pub reachable_forbidden: HashSet<CapabilityId>,
+}
+
+pub fn check_conjunctive_violation(
+    accumulator: &CapabilityAccumulator,
+    rules: &[ConjunctiveDependency],
+    new_cap: &str,
+) -> ViolationReport;
+```
+
+**语义（MUST）：**
+- `CapabilityAccumulator` 的作用域为**单会话**；会话终止时 MUST 调用 `reset()`。
+- `check_conjunctive_violation` 在模拟 `new_cap` 加入后计算**传递闭包**（fix-point over `produces` rules），然后检查 `forbidden` 集合是否被触及。
+- 检查 SHOULD 在 Judge Ensemble 裁决 Allow **之前**执行；若 `violated == true`，MUST 将裁决降级为 Deny 并写入审计。
+- `ConjunctiveRuleIndex` 提供按 `produces` 字段的索引结构，用于高效查找。
+- 规则配置由 Safety DSL 的 `cross_session_guard` 与 `budget_guard` 规则类型映射而来。
+
+参见 `capability_tracker.rs`。
 
 ---
 

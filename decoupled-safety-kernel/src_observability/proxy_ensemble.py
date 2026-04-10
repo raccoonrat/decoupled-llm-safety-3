@@ -393,31 +393,43 @@ class TrajectoryMutationProxy:
 
     h(x_t → x_{t+1}) = cosine_similarity(z_t, z_{t+1}) − drop_threshold
 
+    DCBF recursive condition (Theorem 2.2):
+      h_t = h_pair(state_{t-1}, state_t)   — previous transition smoothness
+      h_t1 = h_pair(state_t, state_{t+1})  — current transition smoothness
+      margin = h_t1 - (1 - alpha) * h_t    >= 0 for forward invariance
+
+    The probe maintains history of the previous h_pair value so that
+    the DCBF margin correctly compares the current-step barrier value
+    against the previous-step barrier value, rather than degenerately
+    setting h_t = h_t1 (which collapses the margin to alpha * h_t).
+
     几何直觉：
       安全轨迹在语义空间中"平滑移动"；若余弦相似度骤降至 drop_threshold 以下，
       表明模型输出发生了剧烈语义转向（向禁区方向跳跃），h < 0 → interrupt。
-
-    对 logprob-缺失的鲁棒性：
-      余弦相似度完全由本地嵌入向量计算，不依赖任何外部 logprobs；
-      即使 API 退化返回单候选、无 logprobs，轨迹仍可被独立监控。
     """
 
     def __init__(self, drop_threshold: float = 0.5) -> None:
         self._drop_threshold = drop_threshold
         self.barrier_id = "trajectory-mutation-v2"
+        self._prev_h: float | None = None
 
     def h_pair(self, state_t: LatentState, state_t1: LatentState) -> float:
         sim = state_t.cosine_similarity(state_t1)
         return sim - self._drop_threshold
 
+    def reset(self) -> None:
+        """Reset history (e.g. at session boundary)."""
+        self._prev_h = None
+
     def check(
         self, state_t: LatentState, state_t1: LatentState, alpha: float,
         *, near_margin_eps: float = 1e-6,
     ) -> DCBFReport:
-        h_t = self.h_pair(state_t, state_t1)
-        # 对于轨迹探针，"下一步"的 h 需要与下一帧的配对；
-        # 在单步调用时 h_t 与 h_t1 使用同一对（退化对称），等价于监控当前步骤的平滑性。
-        h_t1 = h_t
+        h_current = self.h_pair(state_t, state_t1)
+        h_t = self._prev_h if self._prev_h is not None else h_current
+        h_t1 = h_current
+        self._prev_h = h_current
+
         margin = h_t1 - (1.0 - alpha) * h_t
         interrupt = margin < 0.0
         return DCBFReport(
@@ -460,6 +472,7 @@ class PerplexityShiftProxy:
     def __init__(self, entropy_threshold: float = 0.3) -> None:
         self._entropy_threshold = entropy_threshold
         self.barrier_id = "perplexity-shift-v1"
+        self._prev_h: float | None = None
 
     @staticmethod
     def _embedding_entropy(state: LatentState) -> float:
@@ -471,12 +484,19 @@ class PerplexityShiftProxy:
         entropy_diff = abs(self._embedding_entropy(state_t1) - self._embedding_entropy(state_t))
         return self._entropy_threshold - entropy_diff
 
+    def reset(self) -> None:
+        """Reset history (e.g. at session boundary)."""
+        self._prev_h = None
+
     def check(
         self, state_t: LatentState, state_t1: LatentState, alpha: float,
         *, near_margin_eps: float = 1e-6,
     ) -> DCBFReport:
-        h_t = self.h_pair(state_t, state_t1)
-        h_t1 = h_t
+        h_current = self.h_pair(state_t, state_t1)
+        h_t = self._prev_h if self._prev_h is not None else h_current
+        h_t1 = h_current
+        self._prev_h = h_current
+
         margin = h_t1 - (1.0 - alpha) * h_t
         interrupt = margin < 0.0
         return DCBFReport(

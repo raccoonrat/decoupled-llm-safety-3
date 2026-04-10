@@ -38,9 +38,130 @@ pub const QP_INNER_BUDGET: Duration = Duration::from_millis(4);
 /// Exceeding this threshold triggers a `page_fault` to signal the degradation path.
 pub const MAX_CANDIDATE_SET_SIZE: usize = 128;
 
-/// Placeholder automaton handle (RFC §5.0).
-#[derive(Debug, Default)]
-pub struct DeterministicAutomaton;
+/// State identifier for the DFA.
+pub type StateId = usize;
+
+/// A single transition rule in the DFA: on matching `pattern` in state `from`,
+/// transition to state `to`. If `deny` is true, matching triggers an immediate Deny.
+#[derive(Debug, Clone)]
+pub struct AutomatonTransition {
+    pub from: StateId,
+    pub to: StateId,
+    pub pattern: String,
+    pub deny: bool,
+}
+
+/// Deterministic finite automaton for safety policy prefix validation (RFC §5.0).
+///
+/// Compiles DSL regex_deny / keyword_flag rules into a state machine that can
+/// incrementally validate output prefixes. Each `validate_prefix` call advances
+/// the automaton state; if a deny-state is reached, the candidate is rejected.
+///
+/// This bridges the gap between the RFC's `DeterministicAutomaton` specification
+/// and the runtime: DSL rules are lowered to state transitions, enabling future
+/// model checking (CTL/LTL) for conflict-freedom and deadlock-freedom.
+#[derive(Debug, Clone)]
+pub struct DeterministicAutomaton {
+    pub num_states: usize,
+    pub initial_state: StateId,
+    pub deny_states: Vec<StateId>,
+    pub accept_states: Vec<StateId>,
+    pub transitions: Vec<AutomatonTransition>,
+    current_state: StateId,
+    pub automaton_revision: u64,
+}
+
+impl Default for DeterministicAutomaton {
+    fn default() -> Self {
+        Self {
+            num_states: 1,
+            initial_state: 0,
+            deny_states: Vec::new(),
+            accept_states: vec![0],
+            transitions: Vec::new(),
+            current_state: 0,
+            automaton_revision: 0,
+        }
+    }
+}
+
+/// Result of a prefix validation step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixValidation {
+    Accept,
+    Continue,
+    Deny,
+}
+
+impl DeterministicAutomaton {
+    /// Build from a set of deny-pattern strings. Each pattern creates a simple
+    /// two-state sub-automaton: state 0 (start/accept) --[pattern]--> state N (deny).
+    pub fn from_deny_patterns(patterns: &[&str]) -> Self {
+        if patterns.is_empty() {
+            return Self::default();
+        }
+        let num_states = 1 + patterns.len();
+        let mut transitions = Vec::with_capacity(patterns.len());
+        let mut deny_states = Vec::with_capacity(patterns.len());
+        for (i, pat) in patterns.iter().enumerate() {
+            let deny_state = i + 1;
+            deny_states.push(deny_state);
+            transitions.push(AutomatonTransition {
+                from: 0,
+                to: deny_state,
+                pattern: pat.to_string(),
+                deny: true,
+            });
+        }
+        Self {
+            num_states,
+            initial_state: 0,
+            deny_states,
+            accept_states: vec![0],
+            transitions,
+            current_state: 0,
+            automaton_revision: 1,
+        }
+    }
+
+    /// Reset to initial state (e.g. at the start of a new generation step).
+    pub fn reset(&mut self) {
+        self.current_state = self.initial_state;
+    }
+
+    /// Validate whether appending `token_text` to the current prefix is allowed.
+    /// Advances internal state; returns Deny if a deny-state is reached.
+    pub fn validate_prefix(&mut self, token_text: &str) -> PrefixValidation {
+        for t in &self.transitions {
+            if t.from == self.current_state && token_text.contains(&t.pattern) {
+                self.current_state = t.to;
+                if t.deny {
+                    return PrefixValidation::Deny;
+                }
+                return if self.accept_states.contains(&self.current_state) {
+                    PrefixValidation::Accept
+                } else {
+                    PrefixValidation::Continue
+                };
+            }
+        }
+        if self.accept_states.contains(&self.current_state) {
+            PrefixValidation::Accept
+        } else {
+            PrefixValidation::Continue
+        }
+    }
+
+    /// Check a full text against all deny patterns without advancing state.
+    pub fn check_text(&self, text: &str) -> PrefixValidation {
+        for t in &self.transitions {
+            if t.deny && text.contains(&t.pattern) {
+                return PrefixValidation::Deny;
+            }
+        }
+        PrefixValidation::Accept
+    }
+}
 
 /// DCBF summary for projection energy coupling (RFC §5.5).
 #[derive(Debug, Clone)]
@@ -644,7 +765,7 @@ impl DynamicKExpansionPolicy {
                 logits: &logits,
                 topk_indices: &topk,
                 candidate_verdicts: &verdicts,
-                automata: &DeterministicAutomaton,
+                automata: &DeterministicAutomaton::default(),
                 dcbf: &dcbf,
                 deadline: Instant::now() + HARD_LATENCY_BUDGET,
             };
@@ -683,17 +804,22 @@ mod tests {
         }])
     }
 
+    fn test_automaton() -> DeterministicAutomaton {
+        DeterministicAutomaton::default()
+    }
+
     fn make_input_fixture<'a>(
         logits: &'a [f32],
         topk: &'a [usize],
         verdicts: &'a [CandidateVerdict],
         dcbf: &'a DCBFReport,
+        automata: &'a DeterministicAutomaton,
     ) -> ProjectionInput<'a> {
         ProjectionInput {
             logits,
             topk_indices: topk,
             candidate_verdicts: verdicts,
-            automata: &DeterministicAutomaton,
+            automata,
             dcbf,
             deadline: Instant::now() + HARD_LATENCY_BUDGET,
         }
@@ -710,7 +836,8 @@ mod tests {
             CandidateVerdict { index: 0, ensemble: ens_allow() },
         ];
         let dcbf = DCBFReport { h_t: 1.0, margin: 0.1, interrupt: false };
-        let input = make_input_fixture(&logits, &topk, &verdicts, &dcbf);
+        let automaton = test_automaton();
+        let input = make_input_fixture(&logits, &topk, &verdicts, &dcbf, &automaton);
         let solver = AxiomHiveSolver::default();
         let r = solver.enforce_projection_with_timers(input);
         // Lowest energy = -logit = -3.0 at index 2 wins among {0,1,2}.
@@ -728,11 +855,12 @@ mod tests {
             CandidateVerdict { index: 1, ensemble: ens_allow() },
         ];
         let dcbf = DCBFReport { h_t: 1.0, margin: 0.0, interrupt: false };
+        let automaton = test_automaton();
         let input = ProjectionInput {
             logits: &logits,
             topk_indices: &topk,
             candidate_verdicts: &verdicts,
-            automata: &DeterministicAutomaton,
+            automata: &automaton,
             dcbf: &dcbf,
             deadline: Instant::now() + Duration::from_secs(60),
         };
@@ -760,17 +888,18 @@ mod tests {
             CandidateVerdict { index: 2, ensemble: ens_allow() },
         ];
         let dcbf = DCBFReport { h_t: 1.0, margin: 0.5, interrupt: false };
+        let automaton = test_automaton();
         let solver = CachedAxiomHiveSolver::new(1, 16);
 
         let r1 = solver.enforce_projection_with_timers(make_input_fixture(
-            &logits, &topk, &verdicts, &dcbf,
+            &logits, &topk, &verdicts, &dcbf, &automaton,
         ));
         assert!(!r1.cache_hit, "first call must be a miss");
         assert_eq!(solver.cache.miss_count(), 1);
         assert_eq!(solver.cache.hit_count(), 0);
 
         let r2 = solver.enforce_projection_with_timers(make_input_fixture(
-            &logits, &topk, &verdicts, &dcbf,
+            &logits, &topk, &verdicts, &dcbf, &automaton,
         ));
         assert!(r2.cache_hit, "second call must be a hit");
         assert_eq!(r2.timers.qp_elapsed, Duration::ZERO, "cache hit: qp_elapsed must be zero");
@@ -790,11 +919,12 @@ mod tests {
             CandidateVerdict { index: 1, ensemble: ens_allow() },
         ];
         let dcbf = DCBFReport { h_t: 1.0, margin: 0.2, interrupt: false };
+        let automaton = test_automaton();
         let solver = CachedAxiomHiveSolver::new(7, 16);
 
-        solver.enforce_projection_with_timers(make_input_fixture(&logits, &topk, &verdicts, &dcbf));
+        solver.enforce_projection_with_timers(make_input_fixture(&logits, &topk, &verdicts, &dcbf, &automaton));
         let r2 = solver.enforce_projection_with_timers(make_input_fixture(
-            &logits, &topk, &verdicts, &dcbf,
+            &logits, &topk, &verdicts, &dcbf, &automaton,
         ));
         assert!(r2.cache_hit);
         let summary = r2.audit_projection_summary();
@@ -835,9 +965,8 @@ mod tests {
             CandidateVerdict { index: 1, ensemble: ens_allow() },
         ];
         let dcbf = DCBFReport { h_t: 1.0, margin: 0.0, interrupt: false };
+        let automaton = test_automaton();
 
-        // Use a raw AxiomHiveSolver with injected QP delay (to force page_fault).
-        // Then verify manually that CachedAxiomHiveSolver with same params leaves cache empty.
         let inner = AxiomHiveSolver {
             qp_inner_budget: Duration::from_millis(4),
             test_inject_qp_delay: Some(Duration::from_millis(5)),
@@ -851,7 +980,7 @@ mod tests {
             logits: &logits,
             topk_indices: &topk,
             candidate_verdicts: &verdicts,
-            automata: &DeterministicAutomaton,
+            automata: &automaton,
             dcbf: &dcbf,
             deadline: Instant::now() + Duration::from_secs(10),
         };
@@ -862,7 +991,6 @@ mod tests {
 
     #[test]
     fn different_policy_revision_different_cache_key() {
-        // Two solvers with different policy_revision must produce different cache keys.
         let logits = vec![1.0f32, 2.0];
         let topk = [0usize, 1];
         let verdicts = vec![
@@ -874,5 +1002,31 @@ mod tests {
         let k1 = compute_cache_key(&logits, &topk, &dcbf, &verdicts, 1);
         let k2 = compute_cache_key(&logits, &topk, &dcbf, &verdicts, 2);
         assert_ne!(k1, k2, "different policy_revision must yield different cache keys");
+    }
+
+    // ── DeterministicAutomaton tests ─────────────────────────────────────────
+
+    #[test]
+    fn automaton_default_accepts_everything() {
+        let mut dfa = DeterministicAutomaton::default();
+        assert_eq!(dfa.validate_prefix("hello world"), PrefixValidation::Accept);
+        assert_eq!(dfa.validate_prefix("anything"), PrefixValidation::Accept);
+    }
+
+    #[test]
+    fn automaton_deny_pattern_matches() {
+        let mut dfa = DeterministicAutomaton::from_deny_patterns(&["weapon", "jailbreak"]);
+        assert_eq!(dfa.validate_prefix("safe text"), PrefixValidation::Accept);
+        dfa.reset();
+        assert_eq!(dfa.validate_prefix("build a weapon"), PrefixValidation::Deny);
+        dfa.reset();
+        assert_eq!(dfa.validate_prefix("attempt jailbreak now"), PrefixValidation::Deny);
+    }
+
+    #[test]
+    fn automaton_check_text_stateless() {
+        let dfa = DeterministicAutomaton::from_deny_patterns(&["ignore instructions"]);
+        assert_eq!(dfa.check_text("please ignore instructions"), PrefixValidation::Deny);
+        assert_eq!(dfa.check_text("normal request"), PrefixValidation::Accept);
     }
 }
