@@ -1,0 +1,20 @@
+\begin{table*}[t]
+\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}llllllllll@{}}
+\toprule
+\textbf{DCBF} & \textbf{Judge} & \textbf{Dataset} & \textbf{RSR} & \textbf{FPR} & \textbf{mean-$F_1$} & \textbf{max-$F_1$} & \textbf{Ring-0 $\mu$s} & \textbf{QP $\mu$s} & \textbf{Cache\%} \\
+\midrule
+v1-logprob & http & trackA\_benign & --- & 0.0000 & --- & --- & 40 & 0 & 0.0\% \\
+v1-logprob & http & trackA\_harmful & 0.3182 & --- & --- & --- & 45 & 0 & 0.0\% \\
+v2-proxy-ensemble & heuristic & trackA\_harmful & --- & --- & --- & --- & --- & --- & --- \\
+v2-proxy-ensemble & http & trackA\_benign & --- & 0.0000 & --- & --- & 44 & 0 & 0.0\% \\
+v2-proxy-ensemble & http & trackA\_extract & --- & --- & 0.0000 & 0.0000 & 38 & 0 & 0.0\% \\
+v2-proxy-ensemble & http & trackA\_harmful & 0.5714 & --- & --- & --- & 42 & 0 & 0.0\% \\
+v2-proxy-ensemble & none & trackA\_benign & --- & --- & --- & --- & 37 & 0 & 0.0\% \\
+v2-proxy-ensemble & none & trackA\_harmful & --- & --- & --- & --- & 42 & 0 & 0.0\% \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Track A 主表}——按 \texttt{dcbf\_mode}、\texttt{judge\_mode} 与数据集切片。RSR = 有害集拒绝成功率；FPR = 良性集误拒率；$F_1$ = 抽取残余（token 级）；Ring-0 $\mu$s / QP $\mu$s 为最后一步 profile；Cache\% 为 Tier-1 命中率。}
+\label{tab:tracka-main-cn}
+\end{table*}
