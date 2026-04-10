@@ -49,6 +49,8 @@ These are semantic properties. Rice’s theorem states that every non-trivial se
 
 Theorem 1 (Undecidability of global implicit safety)
 
+**Strongest defensible statement**: Since LLM-based systems constitute Turing-complete probabilistic programs, any non-trivial global semantic safety property (extensional safety property) is undecidable. **Required explicit assumption**: The safety property must be a *non-trivial semantic property* (Non-trivial semantic properties) in the Rice-theorem sense. **Must NOT claim**: "Large models are forever unsafe" (over-generalization).
+
 Let be any non-trivial extensional safety property over the semantics of probabilistic programs. Then the decision problem
 
 is undecidable.
@@ -137,6 +139,8 @@ The safe set induced by is
 
 Theorem 2 (Instance-level verification collapses to polynomial time)
 
+**Strongest defensible statement**: Given a *polynomial-bounded candidate set* and a polynomial-time safety predicate, single-step safe filtering can be computed in $\mathcal{O}(|C| \cdot p(|x|))$ time. **Required explicit assumption**: (1) The safety predicate $\sigma$ must be polynomial-time decidable ($\sigma \in \mathbf{P}$); (2) The candidate set must be polynomially bounded ($|C| \le \mathrm{poly}$). **Must NOT claim**: "The decoupled architecture makes all safety verification polynomial-time" (the polynomial bound on $|C|$ is an engineering constraint, not a theorem about LLMs).
+
 Assume , i.e. there exists a polynomial such that can be decided in time . Then **instance-level verifiability**
 
 belongs to .
@@ -185,7 +189,27 @@ where are token scores/logits after restriction to the safe candidate set.
 
 Dynamic model and barrier-based safety
 
-Probabilistic programs and token emitters are dynamical systems. The DCBF literature treats safety as forward invariance of a safe set for discrete-time systems. The cited work explicitly states that discrete-time control barrier functions are used to guarantee forward invariance of a safe set for discrete-time systems, including high relative degree cases. [[ece.ualberta.ca]](https://www.ece.ualberta.ca/~tbs/pmwiki/pdf/IEEE-T-Cybenetics-Xiong-2022.pdf), [[ieeexplore.ieee.org]](https://ieeexplore.ieee.org/document/9777251)Definition 7 (Discrete-time safety set)
+Probabilistic programs and token emitters are dynamical systems. The DCBF literature treats safety as forward invariance of a safe set for discrete-time systems. The cited work explicitly states that discrete-time control barrier functions are used to guarantee forward invariance of a safe set for discrete-time systems, including high relative degree cases. [[ece.ualberta.ca]](https://www.ece.ualberta.ca/~tbs/pmwiki/pdf/IEEE-T-Cybenetics-Xiong-2022.pdf), [[ieeexplore.ieee.org]](https://ieeexplore.ieee.org/document/9777251)
+
+**Assumption 6.1 (Surrogate State Mapping)**
+
+The application of DCBF to LLM systems requires an explicit surrogate mapping from the LLM's high-dimensional hidden space (or output probability distribution) to a low-dimensional continuous state space on which the barrier function $h$ is defined. Formally, we assume the existence of a mapping
+
+$$\phi: \mathcal{H} \to \mathbb{R}^d$$
+
+where $\mathcal{H}$ denotes the model's hidden state space (or an observable proxy thereof), such that the barrier function $h$ in Definition 7 is defined on the image of $\phi$. **This mapping is an explicit system implementation assumption, not a proven theorem.**
+
+Two concrete constructions are supported:
+
+1. **Semantic Boundary Proxy**: $h(z) = \theta_{\mathrm{safe}} - \cos(\phi(z),\, c_{\mathrm{forbidden}})$, where $c_{\mathrm{forbidden}}$ is the centroid of known forbidden-topic embeddings and $\theta_{\mathrm{safe}}$ is a calibrated safety threshold. This corresponds to `SemanticBoundaryProxy` in the reference implementation (`src_observability/proxy_ensemble.py`).
+
+2. **Trajectory Mutation Proxy**: $h(z_t, z_{t-1}) = \theta_{\mathrm{smooth}} - (1 - \cos(\phi(z_t),\, \phi(z_{t-1})))$, measuring smoothness of the latent trajectory. Abrupt trajectory changes (e.g., from jailbreak attempts) yield $h < 0$. This corresponds to `TrajectoryMutationProxy` in the reference implementation.
+
+**Scope limitation**: DCBF does *not* claim to capture all semantic safety properties of natural language. It acts solely on the low-dimensional surrogate risk score trajectory defined by $\phi$. The fidelity of safety guarantees is bounded by the quality of $\phi$ — i.e., by how faithfully the surrogate captures safety-relevant state transitions. For closed-source black-box API models where internal hidden states are inaccessible, $\phi$ must be constructed from API-observable signals only (e.g., output text embeddings, refusal probability scores), reducing to chunk-level rather than token-level monitoring.
+
+* * *
+
+Definition 7 (Discrete-time safety set)
 
 Let
 
@@ -196,6 +220,8 @@ be the safe set.
 * * *
 
 Theorem 2.2 (DCBF forward invariance)
+
+**Strongest defensible statement**: For systems where LLM inference is modeled as discrete-time dynamical evolution, DCBF provides forward invariance for a given *observable latent/state evolution*. **Required explicit assumption**: This holds only for states mapped to a low-dimensional continuous space via Assumption 6.1; how natural language is precisely mapped to the state equation of a dynamical system is an explicit implementation assumption. **Must NOT claim**: "DCBF guarantees that natural language generated by large models is absolutely safe."
 
 Let . Suppose that for all ,
 
@@ -244,6 +270,8 @@ A subsystem with seed is safe iff
 * * *
 
 Theorem 3.1 (Implicit safety is non-compositional)
+
+**Strongest defensible statement**: In the presence of *conjunctive capability dependencies*, component-level implicit safety certifications cannot compose — analyzed via directed hypergraph structure. **Required explicit assumption**: The capability system must be faithfully modelable as a directed hypergraph (Definition 8). **Must NOT claim**: "All agent collaboration leads to unsafe outcomes."
 
 There exist seed sets such that
 
@@ -354,6 +382,8 @@ Define the constant operator
 * * *
 
 Theorem 3.6 (Absorbing fail-safe)
+
+**Strongest defensible statement**: The risk poset of decoupled safety operators is closed under sequential composition. Irresolvable safety conflicts converge irreversibly to the bottom element $\bot$ (Fail-safe). **Required explicit assumption**: The poset has finite meets (is a meet-semilattice) and contains a bottom element $\bot$. **Must NOT claim**: "The safety algebra can automatically repair model conflicts and maintain high performance."
 
 The operator is monotone and safety-preserving. Moreover, for any ,
 

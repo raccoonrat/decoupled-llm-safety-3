@@ -30,6 +30,14 @@ use crate::judge_ensemble::{EnsembleReport, Vote};
 pub const HARD_LATENCY_BUDGET: Duration = Duration::from_millis(20);
 pub const QP_INNER_BUDGET: Duration = Duration::from_millis(4);
 
+/// Polynomial upper bound on candidate set size (Corollary 2.1: |C| ≤ O(poly)).
+///
+/// Theorem 2 requires the candidate set to be polynomially bounded for instance-level
+/// verification to remain in P. This constant enforces that bound: any candidate set
+/// exceeding this limit is truncated to the top-scoring entries before projection.
+/// Exceeding this threshold triggers a `page_fault` to signal the degradation path.
+pub const MAX_CANDIDATE_SET_SIZE: usize = 128;
+
 /// Placeholder automaton handle (RFC §5.0).
 #[derive(Debug, Default)]
 pub struct DeterministicAutomaton;
@@ -281,11 +289,37 @@ impl AxiomHiveBoundary for AxiomHiveSolver {
 
 impl AxiomHiveSolver {
     /// Full projection with **index-keyed** `CandidateVerdict` lookup (never positional zip).
+    ///
+    /// Corollary 2.1 enforcement: if `candidate_verdicts.len()` exceeds
+    /// `MAX_CANDIDATE_SET_SIZE`, the step is rejected with `page_fault = true`
+    /// to guarantee the polynomial-time bound on instance-level verification.
     pub fn enforce_projection_with_timers(&self, input: ProjectionInput<'_>) -> HiveProjectionResult {
         let cache_key = compute_cache_key(
             input.logits, input.topk_indices, input.dcbf,
             input.candidate_verdicts, 0, // no policy_revision in raw solver
         );
+
+        // Corollary 2.1: enforce polynomial bound on candidate set size.
+        // If |C| > MAX_CANDIDATE_SET_SIZE, the branching factor exceeds the
+        // theoretical poly bound → page_fault → graceful degradation FSM.
+        if input.candidate_verdicts.len() > MAX_CANDIDATE_SET_SIZE {
+            return HiveProjectionResult {
+                output: ProjectionOutput {
+                    chosen_index: None,
+                    feasible: false,
+                    energy: 0.0,
+                    distance: 0.0,
+                    page_fault: true,
+                },
+                timers: ProjectionTimers {
+                    qp_elapsed: Duration::ZERO,
+                    qp_budget_exceeded: false,
+                    hard_budget_exceeded: false,
+                },
+                cache_hit: false,
+                cache_key,
+            };
+        }
 
         if Instant::now() > input.deadline {
             return HiveProjectionResult {

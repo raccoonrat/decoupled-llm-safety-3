@@ -293,6 +293,15 @@ def _run_case(case: dict[str, Any], exe: Path) -> CaseResult:
 # 聚合度量
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    s = sorted(values)
+    idx = int(len(s) * pct / 100.0)
+    idx = min(idx, len(s) - 1)
+    return s[idx]
+
+
 def _aggregate(results: list[CaseResult]) -> dict[str, Any]:
     n = len(results)
     if n == 0:
@@ -304,6 +313,13 @@ def _aggregate(results: list[CaseResult]) -> dict[str, Any]:
     mean_qp = sum(r.qp_elapsed_us for r in results) / n
     mean_rust = sum(r.rust_total_us for r in results) / n
 
+    qp_latencies = [float(r.qp_elapsed_us) for r in results]
+    rust_latencies = [float(r.rust_total_us) for r in results]
+    wall_latencies = [r.wall_ms for r in results]
+
+    total_wall_s = sum(wall_latencies) / 1000.0
+    throughput = n / total_wall_s if total_wall_s > 0 else 0.0
+
     return {
         "total_cases": n,
         "blocked_cases": blocked,
@@ -314,6 +330,27 @@ def _aggregate(results: list[CaseResult]) -> dict[str, Any]:
         "cache_hit_rate": round(cache_hits / n, 6),
         "mean_qp_elapsed_us": round(mean_qp, 2),
         "mean_rust_total_us": round(mean_rust, 2),
+        "projection_latency": {
+            "qp_elapsed_us": {
+                "p50": round(_percentile(qp_latencies, 50), 2),
+                "p95": round(_percentile(qp_latencies, 95), 2),
+                "p99": round(_percentile(qp_latencies, 99), 2),
+                "max": round(max(qp_latencies) if qp_latencies else 0, 2),
+            },
+            "rust_total_us": {
+                "p50": round(_percentile(rust_latencies, 50), 2),
+                "p95": round(_percentile(rust_latencies, 95), 2),
+                "p99": round(_percentile(rust_latencies, 99), 2),
+                "max": round(max(rust_latencies) if rust_latencies else 0, 2),
+            },
+            "wall_ms": {
+                "p50": round(_percentile(wall_latencies, 50), 3),
+                "p95": round(_percentile(wall_latencies, 95), 3),
+                "p99": round(_percentile(wall_latencies, 99), 3),
+                "max": round(max(wall_latencies) if wall_latencies else 0, 3),
+            },
+            "throughput_projections_per_sec": round(throughput, 2),
+        },
         "per_case": [asdict(r) for r in results],
     }
 
@@ -365,6 +402,24 @@ def _print_report(report: dict[str, Any]) -> None:
             "长运行服务模式下此率应 > 0"
         )
 
+    lat = report.get("projection_latency", {})
+    qp_lat = lat.get("qp_elapsed_us", {})
+    wall_lat = lat.get("wall_ms", {})
+    tput = lat.get("throughput_projections_per_sec", 0)
+
+    lines.append("")
+    lines.append("  --- Single-Step Projection Latency (Corollary 2.1 poly-time evidence) ---")
+    lines.append(
+        f"  QP elapsed (µs):  p50={qp_lat.get('p50',0):.0f}  "
+        f"p95={qp_lat.get('p95',0):.0f}  p99={qp_lat.get('p99',0):.0f}  "
+        f"max={qp_lat.get('max',0):.0f}"
+    )
+    lines.append(
+        f"  Wall time (ms):   p50={wall_lat.get('p50',0):.2f}  "
+        f"p95={wall_lat.get('p95',0):.2f}  p99={wall_lat.get('p99',0):.2f}  "
+        f"max={wall_lat.get('max',0):.2f}"
+    )
+    lines.append(f"  Throughput:       {tput:.1f} projections/sec")
     lines.append(
         f"  QP_INNER_BUDGET (RFC §10): 4000 µs；"
         f"HARD_LATENCY_BUDGET: 20000 µs"

@@ -1,34 +1,54 @@
 """
 DCBF Proxy Ensemble v0.2 — independent geometric latent-space probes (Gap 1 fix).
 
-# 为什么要替换 logprobs 代理势能？（因果欺骗抵抗性）
-# ─────────────────────────────────────────────────────
-# v0.1 的势能 h(x_t) = Σ logp_i 依赖目标 LLM API 提供的 logprobs。
-# 对手模型可通过对抗性微调（Adversarial Fine-tuning）伪造极高的 logprobs 给
-# 恶意 token（"因果欺骗"），或 API 提供商直接剥夺 logprobs 输出（"API 退化"）。
-#
-# v0.2 解决方案：用两个独立的本地固定权重探针替代：
-#
-#   SemanticBoundaryProxy
-#     用本地可信嵌入模型将文本前缀编码为 z_t；
-#     h(x_t) = threshold − cosine_similarity(z_t, forbidden_centroid)
-#     几何直觉：forbidden_centroid 是"禁区"的质心；
-#     h > 0 表示 z_t 离禁区足够远（安全侧），h < 0 表示已越界。
-#     因果欺骗抵抗性：本地嵌入器权重固定、与目标 LLM 完全隔离；
-#     目标 LLM 的微调无法影响本地 embedding 的几何结构。
-#
-#   TrajectoryMutationProxy
-#     h(x_t→x_{t+1}) = cosine_similarity(z_t, z_{t+1}) − drop_threshold
-#     几何直觉：轨迹"平滑性"即安全性；若相邻步骤向量余弦相似度骤降，
-#     表明语义方向发生突变（可能是被诱导向禁区方向转向），h < 0 → interrupt。
-#
-#   Ensemble 共识：ANY probe interrupt → 整体 interrupt（保守 AND 规则）。
-#
-# 嵌入器降级链（保证无网络/无 GPU 可用时同样运行）
-#   1. SklearnTfidfEmbedder   — sklearn 字符 n-gram TF-IDF（本地，始终离线）
-#   2. HashNgramEmbedder       — 纯 numpy 字符 n-gram 随机投影（零依赖回退）
-#
-# RFC 对齐：RFC §5.2 LatentState 契约；§9 MonitorFault 路由；Theorem 2.2 不变式。
+Theoretical Foundation (Assumption 6.1 & Theorem 2.2 in Step1-理论部分.md)
+=========================================================================
+
+This module implements the **Surrogate State Mapping** (Assumption 6.1) required
+by the DCBF forward invariance theorem (Theorem 2.2). The mapping
+
+    φ: H → R^d
+
+projects the LLM's high-dimensional hidden/output space into a low-dimensional
+continuous state space where the barrier function h can be evaluated.
+
+Two concrete surrogate constructions are provided:
+
+  SemanticBoundaryProxy — implements h via cosine distance to forbidden centroid:
+
+    h(z) = θ_safe − cos(φ(z), c_forbidden)
+
+    where c_forbidden is the centroid of known forbidden-topic embeddings, and
+    θ_safe is a calibrated safety threshold. h > 0 → safe; h < 0 → violation.
+
+  TrajectoryMutationProxy — implements h via trajectory smoothness:
+
+    h(z_t, z_{t-1}) = cos(φ(z_t), φ(z_{t-1})) − θ_smooth
+
+    Abrupt trajectory changes (e.g., jailbreak-induced semantic jumps) yield h < 0.
+
+DCBF forward invariance (Theorem 2.2) is checked at each step:
+
+    margin = h(x_{t+1}) − (1 − α) · h(x_t),  α ∈ (0, 1]
+
+    If margin ≥ 0, the safe superlevel set {x : h(x) ≥ 0} is forward invariant.
+    If margin < 0, the barrier condition is violated → interrupt.
+
+Ensemble consensus: ANY probe interrupt → overall interrupt (conservative AND rule).
+
+Limitations (must be understood by paper reviewers / deployers):
+  - The surrogate mapping φ is NOT proven to capture all safety-relevant semantics.
+  - The fidelity of safety guarantees is bounded by how well the embedder separates
+    safe vs. unsafe regions in R^d.
+  - For closed-source black-box APIs without hidden state access, φ is constructed
+    from output text embeddings only → chunk-level (not token-level) monitoring.
+  - DCBF does NOT claim to "guarantee natural language is absolutely safe."
+
+Embedder degradation chain (runs without network / GPU):
+  1. SklearnTfidfEmbedder — sklearn char n-gram TF-IDF (local, always offline)
+  2. HashNgramEmbedder    — pure numpy char n-gram random projection (zero deps)
+
+RFC alignment: RFC §5.2 LatentState contract; §9 MonitorFault routing; Theorem 2.2.
 """
 
 from __future__ import annotations
