@@ -427,6 +427,70 @@ def _print_report(report: dict[str, Any]) -> None:
     print("\n".join(lines), file=sys.stderr)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# K-sweep benchmark: projection latency vs candidate set size (Round-2 R3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+K_SWEEP_VALUES = [5, 10, 20, 50, 128]
+K_SWEEP_REPEATS = int(os.environ.get("K_SWEEP_REPEATS", "5"))
+
+
+def _k_sweep_cases(k: int, repeats: int = K_SWEEP_REPEATS) -> list[dict[str, Any]]:
+    import random
+    rng = random.Random(42 + k)
+    cases = []
+    for i in range(repeats):
+        logits = [rng.gauss(0, 2) for _ in range(k)]
+        cases.append({
+            "id": f"ksweep_k{k}_r{i}",
+            "payload": {
+                "logits": logits,
+                "topk_indices": list(range(k)),
+                "trace_id": f"ksweep-k{k}-r{i}",
+                "policy_revision": 1,
+                "dcbf_margin": rng.uniform(0.1, 0.8),
+            },
+        })
+    return cases
+
+
+def _run_k_sweep(exe: Path) -> dict[str, Any]:
+    sweep_results: dict[str, Any] = {}
+    for k in K_SWEEP_VALUES:
+        cases = _k_sweep_cases(k)
+        results = [_run_case(c, exe) for c in cases]
+        agg = _aggregate(results)
+        sweep_results[f"K={k}"] = {
+            "k": k,
+            "n": len(results),
+            "projection_latency": agg.get("projection_latency", {}),
+            "projection_over_blocking_rate": agg.get("projection_over_blocking_rate", 0),
+        }
+    return sweep_results
+
+
+def _print_k_sweep(sweep: dict[str, Any]) -> None:
+    lines = [
+        "",
+        "=== K-Sweep Benchmark (Round-2 R3: Axiom Hive performance vs K) ===",
+        f"  {'K':>5}  {'p50 QP(µs)':>12}  {'p95 QP(µs)':>12}  {'p99 QP(µs)':>12}  "
+        f"{'p50 wall(ms)':>13}  {'p95 wall(ms)':>13}  {'tput(proj/s)':>13}  {'OBR':>8}",
+        "  " + "-" * 100,
+    ]
+    for label, data in sweep.items():
+        lat = data.get("projection_latency", {})
+        qp = lat.get("qp_elapsed_us", {})
+        wall = lat.get("wall_ms", {})
+        tput = lat.get("throughput_projections_per_sec", 0)
+        obr = data.get("projection_over_blocking_rate", 0)
+        lines.append(
+            f"  {data['k']:>5}  {qp.get('p50',0):>12.0f}  {qp.get('p95',0):>12.0f}  "
+            f"{qp.get('p99',0):>12.0f}  {wall.get('p50',0):>13.2f}  "
+            f"{wall.get('p95',0):>13.2f}  {tput:>13.1f}  {obr:>8.4f}"
+        )
+    print("\n".join(lines), file=sys.stderr)
+
+
 def main() -> int:
     exe = _find_e2e_bin()
 
@@ -444,6 +508,13 @@ def main() -> int:
         results.append(r)
 
     report = _aggregate(results)
+
+    k_sweep_mode = os.environ.get("UTILITY_K_SWEEP", "0") in ("1", "true", "yes")
+    if k_sweep_mode:
+        sweep = _run_k_sweep(exe)
+        report["k_sweep"] = sweep
+        _print_k_sweep(sweep)
+
     print(json.dumps(report, ensure_ascii=False, indent=2))
     _print_report(report)
 

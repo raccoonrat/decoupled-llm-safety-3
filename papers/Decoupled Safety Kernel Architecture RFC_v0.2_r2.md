@@ -233,6 +233,18 @@ pub trait DCBFEvaluator {
 }
 ```
 
+**Round-2 扩展：多维 DCBF 探针接口（v0.3）**
+
+代理映射 $\phi: \mathcal{H} \to \mathbb{R}^d$ 现支持三个探针维度：
+
+1. **SemanticBoundaryProxy** — $h_1(z) = \theta_{\text{safe}} - \cos(\phi(z), c_{\text{forbidden}})$
+2. **TrajectoryMutationProxy** — $h_2(z_t, z_{t-1}) = \cos(\phi(z_t), \phi(z_{t-1})) - \theta_{\text{smooth}}$
+3. **PerplexityShiftProxy** (新增) — $h_3(z_t, z_{t-1}) = \theta_{\text{entropy}} - |H(\phi(z_t)) - H(\phi(z_{t-1}))|$
+
+`ProxyEnsemble` 实现 AND 共识：任一 probe 报告 `interrupt=true` → 整体 `interrupt=true`。`EnsembleReport` 新增 `perplexity_report: Option<DCBFReport>` 字段。
+
+新增探针 MUST 实现 `check(state_t, state_t1, alpha) -> DCBFReport` 接口并持有 `barrier_id` 标识。部署可通过 `enable_perplexity_probe: bool` 配置开关控制第三维探针的启用。
+
 ### 5.3 Safety DSL
 
 ```rust
@@ -285,6 +297,26 @@ pub trait JudgeEnsemble {
 ```
 
 `final_action` MUST 由**显式计票策略**（部署注册）导出；`conflict == true` 时 `final_action` MUST 为 `Deny`，除非已审计的 **break-glass** 策略显式放行（见 I4）。实现 MUST 将所用策略标识写入审计。
+
+**Round-2 扩展：置信度加权投票（Confidence-Weighted Tally）**
+
+除传统简单计数（`tally()`）外，实现 SHOULD 提供 `confidence_weighted_tally()` 方法。加权规则：
+
+```rust
+pub struct WeightedEnsembleReport {
+    pub base: EnsembleReport,
+    pub weighted_allow: f64,
+    pub weighted_revise: f64,
+    pub weighted_deny: f64,
+    pub weighted_abstain: f64,
+    pub weighted_final_action: Vote,
+}
+```
+
+- 每个验证器 $j$ 的票权重为 `confidence` 字段值 $c_j \in [0, 1]$
+- **Deny-优先不变量**：只要 $W_{\text{deny}} = \sum_{j: v_j = \text{Deny}} c_j > 0$，`weighted_final_action` MUST 为 `Deny`（除 break-glass）
+- 加权路径为可选：部署可选择传统计数或置信度加权；选择 MUST 写入审计
+- 验证器性能参考：Llama-Guard 系列 F1 约 0.82–0.89（JBB-Behaviors），StrongREJECT 精度约 0.91，多裁判投票后系统 FPR < 2%
 
 ### 5.5 Axiom Hive
 
@@ -625,6 +657,22 @@ $$
 - 新 DSL MUST 完整经过 `parse` → **`normalize` → `lint` → `lower`**；**任一步失败则不得**替换在线 `DeterministicAutomaton`。`normalize` 与 `lint` 为规范管道组成部分，**不得**降级为可选步骤。  
 - 切换原子：建议 **double-buffer**（激活指针仅在成功编译后翻转）；旧版本保留至 inflight 请求结束或 TTL。若采用 double-buffer，**inflight 请求 MUST 钉扎**在**请求初始化时观测到的** `policy_revision`（及关联自动机身份），除非部署定义了**已审计**的覆盖机制。  
 - `policy_revision`、`dsl_hash`、`automaton_revision` MUST 写入审计。
+
+**Round-2 补充：DSL 策略热加载具体操作流程**
+
+热加载典型部署流程（基于 Redis Hash 刷新）：
+
+1. **策略编写**：运维人员在 `rfc_contracts/example_policies/` 中创建或修改 `.policy.json` 文件（参见仓库中的 5 个示例：PII 过滤、提示注入防御、有害内容分类、多 Agent 能力围栏、速率限制）。
+2. **验证管道**：通过 CI/CD 或本地工具执行 `parse → normalize → lint → lower`：
+   - `parse`：验证 JSON schema 合法性（`$schema: "decoupled-safety-kernel/policy/v1"`）
+   - `normalize`：标准化正则表达式、关键词大小写、阈值范围检查
+   - `lint`：检测规则冲突（如同一 scope 下的 deny 与 allow 矛盾）
+   - `lower`：将规则编译为 `DeterministicAutomaton` 内部表示
+3. **原子切换**：将新策略写入 Redis Hash（key: `policy:{policy_id}:{revision}`），并更新 `policy_active_revision` 指针。Double-buffer 机制确保 inflight 请求不受影响。
+4. **审计事件**：每次热加载 MUST 产生审计记录：`{policy_id, old_revision, new_revision, dsl_hash, timestamp, operator_id}`。
+5. **回滚**：若新策略导致 FPR 异常升高（通过 canary 流量检测），自动回滚至 `old_revision`。
+
+策略 DSL 支持的规则类型：`regex_deny`, `keyword_flag`, `semantic_classifier`, `cross_session_guard`, `budget_guard`, `rate_limit`, `tool_call_guard`, `information_flow`, `decoy_trigger`。
 
 ### 13.2 配置项 SHOULD 可运行时调整（带默认安全值）
 

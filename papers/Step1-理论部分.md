@@ -199,13 +199,19 @@ $$\phi: \mathcal{H} \to \mathbb{R}^d$$
 
 where $\mathcal{H}$ denotes the model's hidden state space (or an observable proxy thereof), such that the barrier function $h$ in Definition 7 is defined on the image of $\phi$. **This mapping is an explicit system implementation assumption, not a proven theorem.**
 
-Two concrete constructions are supported:
+Three concrete constructions are supported (v0.3 multi-dimensional surrogate):
 
-1. **Semantic Boundary Proxy**: $h(z) = \theta_{\mathrm{safe}} - \cos(\phi(z),\, c_{\mathrm{forbidden}})$, where $c_{\mathrm{forbidden}}$ is the centroid of known forbidden-topic embeddings and $\theta_{\mathrm{safe}}$ is a calibrated safety threshold. This corresponds to `SemanticBoundaryProxy` in the reference implementation (`src_observability/proxy_ensemble.py`).
+1. **Semantic Boundary Proxy** (dimension 1): $h_1(z) = \theta_{\mathrm{safe}} - \cos(\phi(z),\, c_{\mathrm{forbidden}})$, where $c_{\mathrm{forbidden}}$ is the centroid of known forbidden-topic embeddings and $\theta_{\mathrm{safe}}$ is a calibrated safety threshold. This corresponds to `SemanticBoundaryProxy` in the reference implementation (`src_observability/proxy_ensemble.py`).
 
-2. **Trajectory Mutation Proxy**: $h(z_t, z_{t-1}) = \theta_{\mathrm{smooth}} - (1 - \cos(\phi(z_t),\, \phi(z_{t-1})))$, measuring smoothness of the latent trajectory. Abrupt trajectory changes (e.g., from jailbreak attempts) yield $h < 0$. This corresponds to `TrajectoryMutationProxy` in the reference implementation.
+2. **Trajectory Mutation Proxy** (dimension 2): $h_2(z_t, z_{t-1}) = \cos(\phi(z_t),\, \phi(z_{t-1})) - \theta_{\mathrm{smooth}}$, measuring smoothness of the latent trajectory. Abrupt trajectory changes (e.g., from jailbreak attempts) yield $h_2 < 0$. This corresponds to `TrajectoryMutationProxy` in the reference implementation.
 
-**Scope limitation**: DCBF does *not* claim to capture all semantic safety properties of natural language. It acts solely on the low-dimensional surrogate risk score trajectory defined by $\phi$. The fidelity of safety guarantees is bounded by the quality of $\phi$ — i.e., by how faithfully the surrogate captures safety-relevant state transitions. For closed-source black-box API models where internal hidden states are inaccessible, $\phi$ must be constructed from API-observable signals only (e.g., output text embeddings, refusal probability scores), reducing to chunk-level rather than token-level monitoring.
+3. **Perplexity Shift Proxy** (dimension 3, Round-2 addition): $h_3(z_t, z_{t-1}) = \theta_{\mathrm{entropy}} - |H(\phi(z_t)) - H(\phi(z_{t-1}))|$, where $H$ denotes the Shannon entropy of the normalized embedding vector. This detects abrupt distributional shifts — e.g., a sudden jump from "helpful assistant" mode to "unrestricted mode" induced by jailbreak prompts. This corresponds to `PerplexityShiftProxy` in the reference implementation.
+
+**Multi-dimensional ensemble consensus**: All probes operate under AND consensus — any single probe reporting $\mathrm{margin} < 0$ triggers an interrupt. Adding probe dimensions $d' > d$ extends the image space of $\phi$, enlarging the coverage of the safe superlevel set at the cost of increased false-positive risk. The theoretical guarantee of Theorem 2.2 applies to each probe independently; the conjunction preserves forward invariance (if any individual safe set is violated, the overall invariant is broken).
+
+**Multi-dimensional roadmap**: Future extensions include (a) training auxiliary safety scoring models to learn $\phi$ from LLM hidden representations with a "next-step violation probability" objective, (b) introducing multivariate Statistical Process Control (SPC) for detecting slow-drift attacks that evade per-step probes, (c) for black-box API models, employing multi-sample output probing (sampling $k$ completions and computing distributional divergence) to compensate for token-level unobservability.
+
+**Scope limitation**: DCBF does *not* claim to capture all semantic safety properties of natural language. It acts solely on the low-dimensional surrogate risk score trajectory defined by $\phi$. The fidelity of safety guarantees is bounded by the quality of $\phi$ — i.e., by how faithfully the surrogate captures safety-relevant state transitions. Adding more probe dimensions does not constitute a "free guarantee" — each dimension's utility is bounded by the embedder's resolution for safety-relevant semantics. For closed-source black-box API models where internal hidden states are inaccessible, $\phi$ must be constructed from API-observable signals only (e.g., output text embeddings, refusal probability scores), reducing to chunk-level rather than token-level monitoring.
 
 * * *
 

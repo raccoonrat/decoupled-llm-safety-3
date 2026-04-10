@@ -1,0 +1,49 @@
+{
+  "$schema": "decoupled-safety-kernel/policy/v1",
+  "policy_id": "prompt-injection-guard-v1",
+  "description": "Detect and deny common prompt injection patterns in user input.",
+  "version": 1,
+  "rules": [
+    {
+      "rule_id": "deny-ignore-instructions",
+      "type": "regex_deny",
+      "pattern": "(?i)(ignore|disregard|forget)\\s+(all\\s+)?(previous|above|prior|earlier)\\s+(instructions|rules|guidelines|prompts)",
+      "scope": "input",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks 'ignore previous instructions' injection pattern."
+    },
+    {
+      "rule_id": "deny-system-prompt-extraction",
+      "type": "regex_deny",
+      "pattern": "(?i)(repeat|print|show|reveal|output|display)\\s+(your|the|my)?\\s*(system\\s*prompt|initial\\s*instructions|hidden\\s*instructions|secret\\s*instructions)",
+      "scope": "input",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks attempts to extract system prompt content."
+    },
+    {
+      "rule_id": "deny-role-override",
+      "type": "regex_deny",
+      "pattern": "(?i)(you\\s+are\\s+now|act\\s+as|pretend\\s+to\\s+be|roleplay\\s+as)\\s+(DAN|an?\\s+unrestricted|an?\\s+unfiltered|evil)",
+      "scope": "input",
+      "action": "deny",
+      "severity": "high",
+      "explanation": "Blocks DAN-style role override jailbreak attempts."
+    },
+    {
+      "rule_id": "flag-developer-mode",
+      "type": "keyword_flag",
+      "keywords": ["developer mode", "maintenance mode", "debug mode", "god mode", "开发者模式", "调试模式"],
+      "scope": "input",
+      "action": "revise",
+      "severity": "medium",
+      "explanation": "Flags potential developer-mode social engineering."
+    }
+  ],
+  "metadata": {
+    "attack_types_covered": ["prompt injection", "system prompt extraction", "DAN jailbreak", "role override"],
+    "hot_reload": true,
+    "applicable_tracks": ["A"]
+  }
+}

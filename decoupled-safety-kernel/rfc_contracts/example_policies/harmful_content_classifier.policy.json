@@ -1,0 +1,54 @@
+{
+  "$schema": "decoupled-safety-kernel/policy/v1",
+  "policy_id": "harmful-content-classifier-v1",
+  "description": "Classify and deny output containing harmful content categories aligned with JBB-Behaviors taxonomy.",
+  "version": 1,
+  "rules": [
+    {
+      "rule_id": "deny-weapons-synthesis",
+      "type": "semantic_classifier",
+      "category": "weapons_and_explosives",
+      "threshold": 0.85,
+      "scope": "output",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks content providing instructions for weapon or explosive synthesis."
+    },
+    {
+      "rule_id": "deny-malware-instructions",
+      "type": "semantic_classifier",
+      "category": "malware_and_hacking",
+      "threshold": 0.80,
+      "scope": "output",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks content providing malware creation or exploitation instructions."
+    },
+    {
+      "rule_id": "flag-self-harm",
+      "type": "semantic_classifier",
+      "category": "self_harm_and_suicide",
+      "threshold": 0.75,
+      "scope": "output",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks content promoting or instructing self-harm."
+    },
+    {
+      "rule_id": "flag-harassment",
+      "type": "semantic_classifier",
+      "category": "harassment_and_bullying",
+      "threshold": 0.80,
+      "scope": "output",
+      "action": "revise",
+      "severity": "high",
+      "explanation": "Flags content that may constitute targeted harassment."
+    }
+  ],
+  "metadata": {
+    "attack_types_covered": ["harmful content generation", "misuse"],
+    "classifier_backend": "llama-guard-3 or equivalent",
+    "hot_reload": true,
+    "applicable_tracks": ["A", "B"]
+  }
+}

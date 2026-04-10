@@ -429,6 +429,65 @@ class TrajectoryMutationProxy:
 
 
 # ─────────────────────────────────────────────────────
+# Probe 3 — PerplexityShiftProxy (Round-2 Risk 1 response)
+# ─────────────────────────────────────────────────────
+
+class PerplexityShiftProxy:
+    """
+    Perplexity shift probe: detects abrupt entropy changes in the latent trajectory.
+
+    Mathematical formulation (Assumption 6.1, dimension 3):
+
+        h(z_t, z_{t-1}) = θ_entropy − |H(z_t) − H(z_{t-1})|
+
+    where H(z) is the Shannon entropy of the normalized embedding vector
+    (treated as a pseudo-probability distribution after softmax), and θ_entropy
+    is a calibrated threshold for acceptable per-step entropy change.
+
+    Intuition: jailbreak attempts often cause abrupt distributional shifts in
+    the model's latent space — e.g., a sudden jump from "helpful assistant"
+    mode to "unrestricted mode". This manifests as a spike in the entropy
+    difference between consecutive states. h < 0 → interrupt.
+
+    Limitations:
+      - Entropy is computed on the embedding vector, not raw logits; the
+        fidelity depends on how well the embedder preserves distributional
+        information from the original model output.
+      - Gradual entropy drift (slow-burn attacks) may not trigger this probe;
+        it is designed to catch abrupt shifts, not monotonic trends.
+    """
+
+    def __init__(self, entropy_threshold: float = 0.3) -> None:
+        self._entropy_threshold = entropy_threshold
+        self.barrier_id = "perplexity-shift-v1"
+
+    @staticmethod
+    def _embedding_entropy(state: LatentState) -> float:
+        v = np.abs(state.vector) + 1e-12
+        p = v / v.sum()
+        return float(-np.sum(p * np.log2(p)))
+
+    def h_pair(self, state_t: LatentState, state_t1: LatentState) -> float:
+        entropy_diff = abs(self._embedding_entropy(state_t1) - self._embedding_entropy(state_t))
+        return self._entropy_threshold - entropy_diff
+
+    def check(
+        self, state_t: LatentState, state_t1: LatentState, alpha: float,
+        *, near_margin_eps: float = 1e-6,
+    ) -> DCBFReport:
+        h_t = self.h_pair(state_t, state_t1)
+        h_t1 = h_t
+        margin = h_t1 - (1.0 - alpha) * h_t
+        interrupt = margin < 0.0
+        return DCBFReport(
+            h_t=h_t, h_t1=h_t1, margin=margin,
+            near_violation=(not interrupt) and (margin < near_margin_eps),
+            interrupt=interrupt,
+            barrier_id=self.barrier_id,
+        )
+
+
+# ─────────────────────────────────────────────────────
 # ProxyEnsemble — AND 共识（保守规则）
 # ─────────────────────────────────────────────────────
 
@@ -438,16 +497,21 @@ class EnsembleReport:
 
     semantic_report: DCBFReport
     mutation_report: DCBFReport
+    perplexity_report: DCBFReport | None
     interrupt: bool
-    dominant_margin: float      # 取两个 margin 的最小值（最保守）
+    dominant_margin: float
     barrier_ids_triggered: list[str]
 
 
 class ProxyEnsemble:
     """
-    v0.2 多视角代理集（Proxy Ensemble）。
+    v0.3 多视角代理集（Proxy Ensemble）— 三维 DCBF 探针。
 
-    不使用目标 LLM 的 logprobs；内部持有两个独立探针。
+    Probe 1: SemanticBoundaryProxy  — 禁区距离
+    Probe 2: TrajectoryMutationProxy — 轨迹平滑性
+    Probe 3: PerplexityShiftProxy   — 熵突变检测（Round-2 新增）
+
+    不使用目标 LLM 的 logprobs；内部持有独立探针。
     API 降级（logprobs=None）时仍正常工作——势能计算与 logprobs 完全解耦。
     """
 
@@ -455,9 +519,11 @@ class ProxyEnsemble:
         self,
         semantic_proxy: SemanticBoundaryProxy,
         mutation_proxy: TrajectoryMutationProxy,
+        perplexity_proxy: PerplexityShiftProxy | None = None,
     ) -> None:
         self._semantic = semantic_proxy
         self._mutation = mutation_proxy
+        self._perplexity = perplexity_proxy
 
     def embed(self, text: str, trace_id: str) -> LatentState:
         """将文本编码为 LatentState；任何嵌入失败都通过 MonitorFault 上报（不静默失败）。"""
@@ -472,7 +538,7 @@ class ProxyEnsemble:
         near_margin_eps: float = 1e-6,
     ) -> EnsembleReport:
         """
-        对 (state_t, state_t1) 跨步运行两个探针；返回 AND 共识结果。
+        对 (state_t, state_t1) 跨步运行所有探针；返回 AND 共识结果。
         任一探针报告 interrupt=True → 整体 interrupt=True。
         """
         if not (0.0 < alpha <= 1.0):
@@ -481,19 +547,29 @@ class ProxyEnsemble:
         sem = self._semantic.check(state_t, state_t1, alpha, near_margin_eps=near_margin_eps)
         mut = self._mutation.check(state_t, state_t1, alpha, near_margin_eps=near_margin_eps)
 
+        ppx: DCBFReport | None = None
+        if self._perplexity is not None:
+            ppx = self._perplexity.check(state_t, state_t1, alpha, near_margin_eps=near_margin_eps)
+
         interrupt = sem.interrupt or mut.interrupt
-        dominant_margin = min(sem.margin, mut.margin)
+        margins = [sem.margin, mut.margin]
         triggered = []
         if sem.interrupt:
             triggered.append(sem.barrier_id or "semantic-boundary")
         if mut.interrupt:
             triggered.append(mut.barrier_id or "trajectory-mutation")
+        if ppx is not None:
+            interrupt = interrupt or ppx.interrupt
+            margins.append(ppx.margin)
+            if ppx.interrupt:
+                triggered.append(ppx.barrier_id or "perplexity-shift")
 
         return EnsembleReport(
             semantic_report=sem,
             mutation_report=mut,
+            perplexity_report=ppx,
             interrupt=interrupt,
-            dominant_margin=dominant_margin,
+            dominant_margin=min(margins),
             barrier_ids_triggered=triggered,
         )
 
@@ -508,10 +584,12 @@ def build_default_ensemble(
     dim: int = 256,
     safety_threshold: float = 0.3,
     drop_threshold: float = 0.5,
+    entropy_threshold: float = 0.3,
     embedder_preference: str = "hash",
+    enable_perplexity_probe: bool = True,
 ) -> ProxyEnsemble:
     """
-    工厂函数：构建带默认禁区配置的 ProxyEnsemble。
+    工厂函数：构建带默认禁区配置的 ProxyEnsemble（v0.3 三维探针）。
 
     论文/生产中建议从外部配置注入 `forbidden_examples`。
     """
@@ -520,4 +598,9 @@ def build_default_ensemble(
                                             safety_threshold=safety_threshold)
     semantic_proxy = SemanticBoundaryProxy(embedder, region)
     mutation_proxy = TrajectoryMutationProxy(drop_threshold=drop_threshold)
-    return ProxyEnsemble(semantic_proxy=semantic_proxy, mutation_proxy=mutation_proxy)
+    perplexity_proxy = PerplexityShiftProxy(entropy_threshold=entropy_threshold) if enable_perplexity_probe else None
+    return ProxyEnsemble(
+        semantic_proxy=semantic_proxy,
+        mutation_proxy=mutation_proxy,
+        perplexity_proxy=perplexity_proxy,
+    )

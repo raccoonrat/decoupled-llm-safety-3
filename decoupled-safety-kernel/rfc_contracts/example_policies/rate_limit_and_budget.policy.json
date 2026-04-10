@@ -1,0 +1,54 @@
+{
+  "$schema": "decoupled-safety-kernel/policy/v1",
+  "policy_id": "rate-limit-budget-v1",
+  "description": "Enforce per-session interaction budget and rate limits to bound attacker query budget B (RFC §2.2 threat model).",
+  "version": 1,
+  "rules": [
+    {
+      "rule_id": "session-max-rounds",
+      "type": "budget_guard",
+      "metric": "session_rounds",
+      "max_value": 50,
+      "scope": "session",
+      "action": "deny",
+      "severity": "high",
+      "explanation": "Caps single session to N_max=50 rounds; adaptive attackers cannot exceed this query budget."
+    },
+    {
+      "rule_id": "session-max-tokens",
+      "type": "budget_guard",
+      "metric": "session_output_tokens",
+      "max_value": 16384,
+      "scope": "session",
+      "action": "deny",
+      "severity": "high",
+      "explanation": "Caps total output tokens per session to T=16384; prevents exhaustive extraction."
+    },
+    {
+      "rule_id": "rate-limit-per-minute",
+      "type": "rate_limit",
+      "metric": "requests_per_minute",
+      "max_value": 30,
+      "scope": "user",
+      "action": "revise",
+      "severity": "medium",
+      "explanation": "Per-user rate limiting to 30 req/min; exceeding triggers graceful degradation queue."
+    },
+    {
+      "rule_id": "decoy-hit-escalation",
+      "type": "decoy_trigger",
+      "metric": "decoy_hit_count",
+      "max_value": 3,
+      "scope": "session",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "If a session triggers 3+ decoy hits, terminate session and escalate to audit (decoy DoS defense)."
+    }
+  ],
+  "metadata": {
+    "attack_types_covered": ["brute-force extraction", "decoy DoS", "budget exhaustion"],
+    "theory_reference": "RFC §2.2 attacker budget constraint B",
+    "hot_reload": true,
+    "applicable_tracks": ["A"]
+  }
+}

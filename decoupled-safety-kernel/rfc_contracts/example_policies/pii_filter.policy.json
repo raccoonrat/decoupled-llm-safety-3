@@ -1,0 +1,40 @@
+{
+  "$schema": "decoupled-safety-kernel/policy/v1",
+  "policy_id": "pii-filter-v1",
+  "description": "Deny output containing personally identifiable information patterns (credit card numbers, SSNs, phone numbers).",
+  "version": 1,
+  "rules": [
+    {
+      "rule_id": "deny-credit-card",
+      "type": "regex_deny",
+      "pattern": "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})\\b",
+      "scope": "output",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks Visa/MC/Amex/Discover card number patterns in model output."
+    },
+    {
+      "rule_id": "deny-ssn",
+      "type": "regex_deny",
+      "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+      "scope": "output",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks US Social Security Number patterns."
+    },
+    {
+      "rule_id": "deny-phone-with-context",
+      "type": "regex_deny",
+      "pattern": "(?:phone|tel|call|联系|电话)[:\\s]*[+]?\\d[\\d\\s-]{7,14}",
+      "scope": "output",
+      "action": "revise",
+      "severity": "high",
+      "explanation": "Flags phone numbers that appear with contact-indicating context words."
+    }
+  ],
+  "metadata": {
+    "attack_types_covered": ["PII exfiltration", "social engineering data extraction"],
+    "hot_reload": true,
+    "applicable_tracks": ["A"]
+  }
+}

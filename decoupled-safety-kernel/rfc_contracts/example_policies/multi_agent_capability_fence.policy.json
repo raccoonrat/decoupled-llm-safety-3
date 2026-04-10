@@ -1,0 +1,43 @@
+{
+  "$schema": "decoupled-safety-kernel/policy/v1",
+  "policy_id": "multi-agent-capability-fence-v1",
+  "description": "Prevent conjunctive capability leakage across multi-agent interactions (Theorem 3.1 non-composability defense).",
+  "version": 1,
+  "rules": [
+    {
+      "rule_id": "deny-cross-agent-credential-relay",
+      "type": "cross_session_guard",
+      "pattern": "conjunctive_dependency",
+      "max_shared_capabilities": 1,
+      "scope": "inter_agent",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks scenarios where Agent A's output provides credentials consumed by Agent B to achieve a capability neither could alone."
+    },
+    {
+      "rule_id": "deny-split-secret-extraction",
+      "type": "information_flow",
+      "pattern": "split_extraction",
+      "max_fragment_overlap": 0.3,
+      "scope": "output",
+      "action": "deny",
+      "severity": "critical",
+      "explanation": "Blocks split extraction attacks where partial secrets are leaked across multiple responses and later recombined."
+    },
+    {
+      "rule_id": "limit-tool-call-chain-depth",
+      "type": "tool_call_guard",
+      "max_chain_depth": 3,
+      "scope": "tool_calls",
+      "action": "revise",
+      "severity": "high",
+      "explanation": "Limits nested tool call depth to prevent privilege escalation through chained tool invocations."
+    }
+  ],
+  "metadata": {
+    "attack_types_covered": ["conjunctive capability attack", "split extraction", "privilege escalation", "lateral movement"],
+    "theory_reference": "Theorem 3.1 (non-composability of implicit safety)",
+    "hot_reload": true,
+    "applicable_tracks": ["A"]
+  }
+}
