@@ -1,0 +1,72 @@
+{
+  "policy_id": "escalating-sensitivity-v1",
+  "version": "1.0.0",
+  "description": "Multi-round confidential request escalating sensitivity policy. Combines cross_session_guard (detect multi-round credential probing), rate_limit (throttle repeated sensitive queries), and budget_guard (hard cap on sensitive interactions per session). When a user repeatedly requests confidential information across rounds, the system escalates from warning to throttling to hard deny.",
+  "rules": [
+    {
+      "rule_id": "detect-credential-probing",
+      "type": "cross_session_guard",
+      "pattern": "conjunctive_dependency",
+      "description": "Detect multi-round credential probing: if the same session requests access to 2+ distinct credential categories (passwords, API keys, tokens, certificates), flag as potential exfiltration chain.",
+      "capability_categories": [
+        "credential:password",
+        "credential:api_key",
+        "credential:token",
+        "credential:certificate"
+      ],
+      "max_shared_capabilities": 1,
+      "scope": "session",
+      "action": "deny",
+      "severity": "critical",
+      "audit_tag": "escalating_sensitivity:credential_probing"
+    },
+    {
+      "rule_id": "throttle-sensitive-queries",
+      "type": "rate_limit",
+      "description": "Throttle users who issue more than 5 sensitive-topic queries within a 60-second window. This provides a graduated response before hard denial.",
+      "max_requests": 5,
+      "window_seconds": 60,
+      "scope": "session",
+      "trigger_pattern": "(?i)(password|secret|credential|api.?key|private.?key|token|certificate|ssn|social.?security)",
+      "action": "revise",
+      "severity": "high",
+      "revise_template": "Your request frequency for sensitive topics has been throttled. Please wait before retrying.",
+      "audit_tag": "escalating_sensitivity:rate_throttle"
+    },
+    {
+      "rule_id": "hard-cap-sensitive-interactions",
+      "type": "budget_guard",
+      "description": "Hard cap: no more than 10 sensitive-topic interactions per session. After this budget is exhausted, all subsequent sensitive requests are denied outright.",
+      "max_interactions": 10,
+      "scope": "session",
+      "trigger_pattern": "(?i)(password|secret|credential|api.?key|private.?key|token|certificate)",
+      "action": "deny",
+      "severity": "critical",
+      "audit_tag": "escalating_sensitivity:budget_exhausted"
+    },
+    {
+      "rule_id": "flag-escalation-pattern",
+      "type": "keyword_flag",
+      "description": "Flag inputs that exhibit escalation rhetoric (e.g., 'I already have access', 'just need one more', 'my manager approved') which are common in social engineering attacks.",
+      "keywords": [
+        "already have access",
+        "just need one more",
+        "manager approved",
+        "emergency override",
+        "authorized to access",
+        "bypass the restriction"
+      ],
+      "scope": "input",
+      "action": "revise",
+      "severity": "high",
+      "revise_template": "Authorization claims in prompts cannot be verified. Please use proper authorization channels.",
+      "audit_tag": "escalating_sensitivity:social_engineering_flag"
+    }
+  ],
+  "metadata": {
+    "author": "security-kernel-team",
+    "created": "2025-04-10",
+    "use_case": "Protecting systems where users may attempt multi-round credential extraction through gradual escalation. Combines three defense layers: capability dependency detection (cross_session_guard), rate limiting, and hard budget caps, demonstrating DSL composability.",
+    "deployment_notes": "Enable all four rules simultaneously. The cross_session_guard provides semantic-level protection, while rate_limit and budget_guard provide quantitative bounds. The keyword_flag catches common social engineering patterns."
+  }
+}

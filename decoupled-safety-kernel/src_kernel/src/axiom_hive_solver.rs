@@ -539,6 +539,133 @@ impl AxiomHiveBoundary for CachedAxiomHiveSolver {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DynamicKExpansionPolicy — Round-3 R2: retry with expanded K on EmptySafeCandidateSet
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maximum K after dynamic expansion. Beyond this, hard reject is enforced.
+pub const MAX_EXPANDED_K: usize = 512;
+
+/// Policy for handling `EmptySafeCandidateSet` (no feasible candidate after projection).
+///
+/// When `enforce_projection` yields `chosen_index == None && feasible == false && !page_fault`,
+/// all top-K candidates were denied. Instead of immediately rejecting, this policy allows
+/// doubling K (up to `MAX_EXPANDED_K`) and re-invoking the solver with the expanded set.
+///
+/// This addresses the Round-3 reviewer concern that hard rejection on empty safe set is
+/// overly conservative and may degrade utility unnecessarily.
+#[derive(Debug, Clone)]
+pub struct DynamicKExpansionPolicy {
+    pub enabled: bool,
+    pub initial_k: usize,
+    pub max_k: usize,
+    pub max_retries: usize,
+}
+
+impl Default for DynamicKExpansionPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            initial_k: MAX_CANDIDATE_SET_SIZE,
+            max_k: MAX_EXPANDED_K,
+            max_retries: 2,
+        }
+    }
+}
+
+/// Result of a dynamic-K expansion attempt.
+#[derive(Debug, Clone)]
+pub struct DynamicExpansionResult {
+    pub final_k: usize,
+    pub expansions_attempted: usize,
+    pub final_result: HiveProjectionResult,
+    pub expanded: bool,
+}
+
+impl DynamicKExpansionPolicy {
+    /// Attempt projection with dynamic K expansion.
+    ///
+    /// `make_input_for_k` is a closure that, given a K value, returns a new
+    /// `(topk_indices, candidate_verdicts, logits)` tuple expanded to that K.
+    /// The caller is responsible for fetching additional candidates from the
+    /// model's logit distribution.
+    ///
+    /// Returns `DynamicExpansionResult` with the final K used, number of
+    /// expansion attempts, and the last projection result.
+    pub fn try_with_expansion<F>(
+        &self,
+        solver: &AxiomHiveSolver,
+        initial_result: HiveProjectionResult,
+        initial_input_k: usize,
+        mut make_input_for_k: F,
+    ) -> DynamicExpansionResult
+    where
+        F: FnMut(usize) -> Option<(Vec<usize>, Vec<CandidateVerdict>, Vec<f32>)>,
+    {
+        if !self.enabled {
+            return DynamicExpansionResult {
+                final_k: initial_input_k,
+                expansions_attempted: 0,
+                final_result: initial_result,
+                expanded: false,
+            };
+        }
+
+        let is_empty_safe_set = initial_result.output.chosen_index.is_none()
+            && !initial_result.output.feasible
+            && !initial_result.output.page_fault;
+
+        if !is_empty_safe_set {
+            return DynamicExpansionResult {
+                final_k: initial_input_k,
+                expansions_attempted: 0,
+                final_result: initial_result,
+                expanded: false,
+            };
+        }
+
+        let mut current_k = initial_input_k;
+        let mut last_result = initial_result;
+        let mut attempts = 0;
+
+        while attempts < self.max_retries && current_k < self.max_k {
+            let new_k = (current_k * 2).min(self.max_k);
+            if new_k == current_k {
+                break;
+            }
+            current_k = new_k;
+            attempts += 1;
+
+            let Some((topk, verdicts, logits)) = make_input_for_k(current_k) else {
+                break;
+            };
+
+            let dcbf = DCBFReport { h_t: 1.0, margin: 0.1, interrupt: false };
+            let input = ProjectionInput {
+                logits: &logits,
+                topk_indices: &topk,
+                candidate_verdicts: &verdicts,
+                automata: &DeterministicAutomaton,
+                dcbf: &dcbf,
+                deadline: Instant::now() + HARD_LATENCY_BUDGET,
+            };
+
+            last_result = solver.enforce_projection_with_timers(input);
+
+            if last_result.output.chosen_index.is_some() {
+                break;
+            }
+        }
+
+        DynamicExpansionResult {
+            final_k: current_k,
+            expansions_attempted: attempts,
+            final_result: last_result,
+            expanded: attempts > 0,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 

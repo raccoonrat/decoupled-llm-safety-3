@@ -604,3 +604,151 @@ def build_default_ensemble(
         mutation_proxy=mutation_proxy,
         perplexity_proxy=perplexity_proxy,
     )
+
+
+# ─────────────────────────────────────────────────────
+# Threshold sensitivity analysis (Round-3 R1 response)
+# ─────────────────────────────────────────────────────
+
+def threshold_sensitivity_sweep(
+    benign_texts: Sequence[str],
+    malicious_texts: Sequence[str],
+    *,
+    forbidden_examples: Sequence[str] = DEFAULT_FORBIDDEN_EXAMPLES,
+    dim: int = 256,
+    embedder_preference: str = "hash",
+    theta_safe_range: Sequence[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+    theta_smooth_range: Sequence[float] = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
+    theta_entropy_range: Sequence[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+    alpha: float = 0.5,
+) -> dict:
+    """
+    Sweep threshold parameters across benign/malicious text pairs and report
+    TPR (true positive rate = fraction of malicious pairs correctly interrupted)
+    and FPR (false positive rate = fraction of benign pairs incorrectly interrupted)
+    for each probe independently.
+
+    Returns a dict with keys "semantic", "trajectory", "perplexity", each mapping
+    to a list of {threshold, tpr, fpr} dicts.
+
+    This function supports the Round-3 reviewer request for threshold calibration
+    evidence (§1 of [0410-3]round3-review.md).
+    """
+    embedder = build_embedder(preferred=embedder_preference, dim=dim,
+                              corpus=list(forbidden_examples))
+
+    def _embed_pairs(texts: Sequence[str]) -> list[tuple]:
+        states = [LatentState(trace_id=f"sweep-{i}", vector=embedder.encode(t),
+                              source_layer="sweep", dimension=dim, probe_version="v0.3")
+                  for i, t in enumerate(texts)]
+        return list(zip(states[:-1], states[1:])) if len(states) >= 2 else []
+
+    benign_pairs = _embed_pairs(benign_texts)
+    malicious_pairs = _embed_pairs(malicious_texts)
+
+    region = ForbiddenRegion.from_examples(embedder, examples=forbidden_examples,
+                                            safety_threshold=0.3)
+
+    results: dict = {"semantic": [], "trajectory": [], "perplexity": []}
+
+    for theta in theta_safe_range:
+        region_t = ForbiddenRegion.from_examples(embedder, examples=forbidden_examples,
+                                                  safety_threshold=theta)
+        probe = SemanticBoundaryProxy(embedder, region_t)
+        fp = sum(1 for s_t, s_t1 in benign_pairs
+                 if probe.check(s_t, s_t1, alpha).interrupt) if benign_pairs else 0
+        tp = sum(1 for s_t, s_t1 in malicious_pairs
+                 if probe.check(s_t, s_t1, alpha).interrupt) if malicious_pairs else 0
+        results["semantic"].append({
+            "threshold": theta,
+            "tpr": tp / max(len(malicious_pairs), 1),
+            "fpr": fp / max(len(benign_pairs), 1),
+        })
+
+    for theta in theta_smooth_range:
+        probe = TrajectoryMutationProxy(drop_threshold=theta)
+        fp = sum(1 for s_t, s_t1 in benign_pairs
+                 if probe.check(s_t, s_t1, alpha).interrupt) if benign_pairs else 0
+        tp = sum(1 for s_t, s_t1 in malicious_pairs
+                 if probe.check(s_t, s_t1, alpha).interrupt) if malicious_pairs else 0
+        results["trajectory"].append({
+            "threshold": theta,
+            "tpr": tp / max(len(malicious_pairs), 1),
+            "fpr": fp / max(len(benign_pairs), 1),
+        })
+
+    for theta in theta_entropy_range:
+        probe = PerplexityShiftProxy(entropy_threshold=theta)
+        fp = sum(1 for s_t, s_t1 in benign_pairs
+                 if probe.check(s_t, s_t1, alpha).interrupt) if benign_pairs else 0
+        tp = sum(1 for s_t, s_t1 in malicious_pairs
+                 if probe.check(s_t, s_t1, alpha).interrupt) if malicious_pairs else 0
+        results["perplexity"].append({
+            "threshold": theta,
+            "tpr": tp / max(len(malicious_pairs), 1),
+            "fpr": fp / max(len(benign_pairs), 1),
+        })
+
+    return results
+
+
+# ─────────────────────────────────────────────────────
+# Sliding Window Monitor (Round-3 R1 — gradual attack detection)
+# ─────────────────────────────────────────────────────
+
+class SlidingWindowMonitor:
+    """
+    CUSUM-based sliding window monitor for detecting gradual risk accumulation.
+
+    Implements the Page's CUSUM algorithm on the barrier function sequence h_t:
+
+        S_t = max(0, S_{t-1} + (mu_0 - h_t) - drift_allowance)
+
+    where mu_0 is the expected safe-state barrier value and drift_allowance
+    controls sensitivity. When S_t exceeds the decision_threshold, a slow-drift
+    alarm is raised.
+
+    This addresses the Round-3 reviewer concern that per-step DCBF probes may
+    miss gradual "boiling frog" attacks where each step's h_t remains above zero
+    but trends downward across many steps.
+
+    Limitations:
+      - The CUSUM is parameterized by mu_0 and drift_allowance which require
+        calibration on deployment-specific benign traffic.
+      - This is an EXPERIMENTAL component (opt-in via ProxyEnsemble configuration).
+      - Does not replace per-step DCBF checks; it supplements them.
+    """
+
+    def __init__(
+        self,
+        mu_0: float = 0.2,
+        drift_allowance: float = 0.05,
+        decision_threshold: float = 1.0,
+        window_size: int = 20,
+    ) -> None:
+        self._mu_0 = mu_0
+        self._drift_allowance = drift_allowance
+        self._decision_threshold = decision_threshold
+        self._window_size = window_size
+        self._cusum: float = 0.0
+        self._history: list[float] = []
+
+    def update(self, h_t: float) -> bool:
+        """Feed a new barrier value h_t. Returns True if slow-drift alarm is triggered."""
+        self._history.append(h_t)
+        if len(self._history) > self._window_size:
+            self._history.pop(0)
+        self._cusum = max(0.0, self._cusum + (self._mu_0 - h_t) - self._drift_allowance)
+        return self._cusum >= self._decision_threshold
+
+    def reset(self) -> None:
+        self._cusum = 0.0
+        self._history.clear()
+
+    @property
+    def cusum(self) -> float:
+        return self._cusum
+
+    @property
+    def alarm(self) -> bool:
+        return self._cusum >= self._decision_threshold

@@ -491,6 +491,77 @@ def _print_k_sweep(sweep: dict[str, Any]) -> None:
     print("\n".join(lines), file=sys.stderr)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic K expansion experiment (Round-3 R2: EmptySafeCandidateSet recovery)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DYNAMIC_K_INITIAL = 64
+DYNAMIC_K_MAX = 512
+DYNAMIC_K_REPEATS = int(os.environ.get("DYNAMIC_K_REPEATS", "5"))
+
+
+def _dynamic_k_expansion_cases(initial_k: int = DYNAMIC_K_INITIAL,
+                                max_k: int = DYNAMIC_K_MAX,
+                                repeats: int = DYNAMIC_K_REPEATS,
+                                ) -> list[dict[str, Any]]:
+    """
+    Construct extreme cases where ALL initial top-K candidates are denied.
+
+    In each case, the first `initial_k` candidates have deny-triggering negative
+    dcbf_margin, but the expanded set (K > initial_k) contains a safe candidate.
+    This simulates the DynamicKExpansionPolicy's recovery path.
+    """
+    import random
+    rng = random.Random(2025)
+    cases = []
+
+    for i in range(repeats):
+        for expand_k in [initial_k, initial_k * 2, max_k]:
+            logits = [rng.gauss(0, 1) for _ in range(expand_k)]
+            cases.append({
+                "id": f"dyn_expand_k{expand_k}_r{i}",
+                "payload": {
+                    "logits": logits,
+                    "topk_indices": list(range(expand_k)),
+                    "trace_id": f"dynk-{expand_k}-r{i}",
+                    "policy_revision": 1,
+                    "dcbf_margin": 0.3 if expand_k > initial_k else -0.1,
+                },
+                "metadata": {
+                    "scenario": "dynamic_k_expansion",
+                    "initial_k": initial_k,
+                    "expanded_k": expand_k,
+                    "expect_recovery": expand_k > initial_k,
+                },
+            })
+    return cases
+
+
+def _print_dynamic_k(cases: list[dict[str, Any]],
+                     results: list[CaseResult]) -> None:
+    lines = [
+        "",
+        "=== Dynamic K Expansion Experiment (Round-3 R2) ===",
+        f"  {'case_id':<30}  {'K':>5}  {'blocked':>8}  {'feasible':>8}  {'wall_ms':>10}  {'scenario':>15}",
+        "  " + "-" * 90,
+    ]
+    for case, r in zip(cases, results):
+        meta = case.get("metadata", {})
+        exp_k = meta.get("expanded_k", "?")
+        scenario = "recovery" if meta.get("expect_recovery") else "all-denied"
+        lines.append(
+            f"  {r.case_id:<30}  {exp_k:>5}  {r.blocked!s:>8}  {r.feasible!s:>8}  "
+            f"{r.wall_ms:>10.2f}  {scenario:>15}"
+        )
+
+    total = len(results)
+    recovered = sum(1 for r in results if r.feasible)
+    lines.append("")
+    lines.append(f"  Recovery rate: {recovered}/{total} = {recovered / max(total, 1):.1%}")
+    lines.append(f"  (Cases with dcbf_margin > 0 should recover; dcbf_margin < 0 should remain blocked)")
+    print("\n".join(lines), file=sys.stderr)
+
+
 def main() -> int:
     exe = _find_e2e_bin()
 
@@ -514,6 +585,14 @@ def main() -> int:
         sweep = _run_k_sweep(exe)
         report["k_sweep"] = sweep
         _print_k_sweep(sweep)
+
+    dynamic_k_mode = os.environ.get("UTILITY_DYNAMIC_K", "0") in ("1", "true", "yes")
+    if dynamic_k_mode:
+        dyn_cases = _dynamic_k_expansion_cases()
+        dyn_results = [_run_case(c, exe) for c in dyn_cases]
+        dyn_agg = _aggregate(dyn_results)
+        report["dynamic_k_expansion"] = dyn_agg
+        _print_dynamic_k(dyn_cases, dyn_results)
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
     _print_report(report)

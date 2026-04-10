@@ -318,6 +318,21 @@ pub struct WeightedEnsembleReport {
 - 加权路径为可选：部署可选择传统计数或置信度加权；选择 MUST 写入审计
 - 验证器性能参考：Llama-Guard 系列 F1 约 0.82–0.89（JBB-Behaviors），StrongREJECT 精度约 0.91，多裁判投票后系统 FPR < 2%
 
+#### Round-3 扩展：Confidence 校准指导
+
+各类验证器的 `confidence` 字段来源不同，部署者 SHOULD 按以下指导配置：
+
+| 验证器类型 | `confidence` 来源 | 校准建议 |
+|---|---|---|
+| LLM 型（如 Llama-Guard） | softmax 输出概率中安全/不安全类别的最大概率 | SHOULD 启用温度缩放后处理 $c' = \sigma(\log(c)/T)$（$T > 1$），在验证集上通过最小化 ECE 获取 $T$ |
+| 规则型（regex_deny, keyword_flag） | 固定 `1.0`（确定性匹配） | 无需校准 |
+| 外部分类器（StrongREJECT 等） | 评分归一化至 $[0,1]$ | SHOULD 在部署目标数据集上验证评分分布的单调性 |
+| 自定义验证器 | 部署者自行定义 | MUST 保证 $c \in [0,1]$；SHOULD 在验证集上测量 ECE |
+
+**关键不变量：** Deny-优先原则确保即使单个验证器给出高 confidence 的 Allow，只要存在任意 Deny 票（不论 confidence），最终裁决仍为 Deny。此不变量使加权投票的安全保证**单调**——增加验证器数量或调整 confidence 仅可能使系统更严格。
+
+**审计要求（MUST）：** Evidence Chain 中每条判决记录 MUST 包含各验证器的 `verifier_id`、原始 `vote`、`confidence` 值及加权得分，以支持事后归因分析。
+
 ### 5.5 Axiom Hive
 
 ```rust
@@ -351,6 +366,26 @@ pub trait AxiomHiveBoundary {
 **规范语义（MUST）：** Axiom Hive 的输入候选集 MUST 为：在 `topk_indices` 上**前缀合法**（`validate_prefix` 成功）且该候选的 `EnsembleReport.final_action != Deny` 的条目；`ProjectionInput.candidate_verdicts` MUST **一一对应**上述候选（每项携带其 `index` 与完整 `EnsembleReport`）。若 `feasible == false` 或 `page_fault == true`，`chosen_index` MUST 为 `None`。
 
 **索引匹配（MUST，消除 zip 歧义）：** `candidate_verdicts` 的条目顺序 MAY 与 `topk_indices` 不同，但每项 **MUST** 携带其自身的 `index`；`AxiomHiveBoundary::enforce_projection` **MUST** 按 **index 身份**解析 logits 与裁决，**禁止**假定 `topk_indices` 与 `candidate_verdicts` 按下标位置 zip 一一对应。确定性实现 **SHOULD** 保持与 `topk_indices` 相同的迭代顺序；若顺序不同，**仍 MUST** 仅依赖 `index` 匹配。
+
+#### Round-3 扩展：动态 K 扩容接口（DynamicKExpansionPolicy）
+
+当 `enforce_projection` 返回 `chosen_index == None && feasible == false && page_fault == false`（即 `EmptySafeCandidateSet`——所有 top-K 候选均被 Deny），部署者 MAY 启用 `DynamicKExpansionPolicy` 以尝试恢复：
+
+```rust
+pub struct DynamicKExpansionPolicy {
+    pub enabled: bool,       // 默认 false，需显式启用
+    pub initial_k: usize,    // 初始 K（默认 MAX_CANDIDATE_SET_SIZE = 128）
+    pub max_k: usize,        // 扩容上限（默认 MAX_EXPANDED_K = 512）
+    pub max_retries: usize,  // 最大重试次数（默认 2）
+}
+```
+
+**语义（SHOULD / MAY）：**
+- 当 `EmptySafeCandidateSet` 触发且 `enabled == true` 时，系统 SHOULD 将 K 翻倍并重新请求 Ring-3 提供扩展后的 top-K 候选集。
+- 重试次数 MUST NOT 超过 `max_retries`，扩展后的 K MUST NOT 超过 `max_k`。
+- 每次扩容重试 MUST 生成独立的 `AuditRecord`（含 `expansion_attempt` 计数和实际使用的 K 值）。
+- 若扩容后仍为 `EmptySafeCandidateSet`，MUST 回退至 Graceful Degradation FSM。
+- 该策略默认 **关闭**。部署者在高安全场景（金融、医疗）中 SHOULD NOT 启用；在高可用场景（客服、创作辅助）中 MAY 启用以减少空回复。
 
 ### 5.6 Graceful Degradation
 
